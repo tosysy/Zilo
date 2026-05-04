@@ -1,35 +1,33 @@
-# Zilo - Procesador de PDFs
+# Zilo - Procesador Inteligente de PDFs
 
-Zilo es una aplicación de escritorio desarrollada con Electron para la gestión y procesamiento eficiente de archivos PDF.
+Zilo es una solución avanzada de escritorio para la gestión, clasificación y procesamiento de documentos PDF, diseñada para optimizar flujos de trabajo que requieren precisión y velocidad.
 
-## Características
+## Funcionalidades Principales
 
-- Interfaz intuitiva para el manejo de documentos.
-- Funcionalidades de búsqueda y renombrado manual.
-- Sistema de gestión de copias de seguridad.
-- Configuración personalizada del flujo de trabajo.
+### 🔍 Procesamiento OCR Avanzado
+Zilo integra tecnología de Reconocimiento Óptico de Caracteres (OCR) para extraer texto de documentos escaneados.
+- **Indexación Automática:** El contenido extraído se indexa para permitir búsquedas instantáneas de documentos.
+- **Configuración de Escaneo:** Permite definir cuántas páginas procesar por archivo para optimizar el rendimiento.
+- **Procesamiento Concurrente:** Capacidad de procesar múltiples archivos simultáneamente con límites configurables.
 
-## Instalación y Uso
+### 🏷️ Renombrado Inteligente y Manual
+- **Renombrado por OCR:** Capacidad de identificar patrones de texto para sugerir nombres de archivos precisos (Series, Códigos, Tipos de Documento).
+- **Ventana de Renombrado Manual:** Interfaz dedicada con visor de PDF integrado que permite:
+  - Zoom dinámico y navegación fluida por el documento.
+  - Validación en tiempo real de formatos (Series y Códigos numéricos).
+  - Previsualización instantánea del nombre final del archivo.
+- **Vigilancia de Carpetas (Watch Mode):** Monitoreo en tiempo real de carpetas específicas; los archivos nuevos se detectan y procesan automáticamente.
 
-1. Clona el repositorio.
-2. Instala las dependencias:
-   ```bash
-   npm install
-   ```
-3. Inicia la aplicación:
-   ```bash
-   npm start
-   ```
+### 📂 Organización y Clasificación
+- **Clasificación por Reglas:** Los documentos pueden moverse automáticamente a carpetas de destino basadas en su contenido o metadatos.
+- **Seguridad de Datos:** Sistema integrado de copias de seguridad para prevenir la pérdida de información durante procesos de movimiento o renombrado.
+- **Persistencia en SQLite:** Utiliza una base de datos robusta para el seguimiento de archivos procesados y configuración.
 
-## Construcción (Build)
+### 🖥️ Interfaz y Experiencia de Usuario
+- **Modo Oscuro/Claro:** Interfaz personalizable que se adapta a las preferencias visuales del usuario.
+- **Búsqueda Multitérmino:** Motor de búsqueda potente que permite filtrar documentos por múltiples términos en cascada.
+- **Control de Estado:** Bloqueo de seguridad en carpetas críticas para evitar modificaciones accidentales.
 
-Para generar el ejecutable en Windows, puedes usar el script de construcción:
-```bash
-npm run build
-```
+---
 
-## Tecnologías Utilizadas
-
-- [Electron](https://www.electronjs.org/)
-- JavaScript / Node.js
-- SQLite (para persistencia de datos)
+*Nota: Los instaladores y ejecutables están disponibles en la sección de [Releases](https://github.com/tosysy/Zilo/releases).*
