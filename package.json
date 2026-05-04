@@ -1,0 +1,45 @@
+{
+  "name": "zilo",
+  "version": "2.0.1",
+  "description": "Procesador de PDFs",
+  "main": "main.js",
+  "author": "Pablo Couse Pena",
+  "license": "ISC",
+  "scripts": {
+    "start": "electron .",
+    "build": "build.bat"
+  },
+  "devDependencies": {
+    "electron": "^38.3.0",
+    "electron-builder": "^24.9.1"
+  },
+  "build": {
+    "appId": "com.pablocouse.zilo",
+    "productName": "Zilo",
+    "directories": {
+      "output": "dist-build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "search-preload.js",
+      "settings-preload.js",
+      "manual-rename-preload.js",
+      "renderer/**/*",
+      "build/icon.png",
+      "!node_modules/**/*"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico"
+    }
+  }
+}

@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Renombrado Manual</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', 'Helvetica Neue', sans-serif;
+            background-color: #fcfcfc;
+            overflow: hidden;
+        }
+
+        body.dark-mode {
+            background-color: #1e1e1e;
+            color: #e0e0e0;
+        }
+
+        .manual-rename-container {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            padding: 20px 20px 10px 20px;
+            box-sizing: border-box;
+            overflow: hidden;
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .header h2 {
+            margin: 0;
+            font-size: 1.5rem;
+            color: #2c3e50;
+        }
+
+        body.dark-mode .header h2 {
+            color: #e0e0e0;
+        }
+
+        .queue-badge {
+            background: #3498db;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+
+        .content {
+            display: flex;
+            gap: 20px;
+            flex: 1;
+            overflow: hidden;
+            min-height: 0;
+        }
+
+        .pdf-preview-section {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            background: white;
+            border-radius: 8px;
+            padding: 15px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            overflow: hidden;
+            min-height: 0;
+            max-height: 100%;
+            min-width: 500px;
+        }
+
+        body.dark-mode .pdf-preview-section {
+            background: #2d2d2d;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+        }
+
+        .pdf-preview-section h3 {
+            margin: 0 0 10px 0;
+            font-size: 1rem;
+            color: #34495e;
+        }
+
+        body.dark-mode .pdf-preview-section h3 {
+            color: #b0b0b0;
+        }
+
+        .pdf-canvas-container {
+            overflow: auto;
+            display: flex;
+            justify-content: flex-start;
+            align-items: flex-start;
+            background: #f8f9fa;
+            border-radius: 4px;
+            padding: 10px;
+            flex: 1;
+            min-height: 400px;
+            position: relative;
+            cursor: grab;
+        }
+
+        .pdf-canvas-container::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+
+        .pdf-canvas-container::-webkit-scrollbar-track {
+            background: #e0e0e0;
+            border-radius: 3px;
+        }
+
+        .pdf-canvas-container::-webkit-scrollbar-thumb {
+            background: #888;
+            border-radius: 3px;
+        }
+
+        .pdf-canvas-container::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
+
+        body.dark-mode .pdf-canvas-container::-webkit-scrollbar-track {
+            background: #2a2a2a;
+        }
+
+        body.dark-mode .pdf-canvas-container::-webkit-scrollbar-thumb {
+            background: #555;
+        }
+
+        body.dark-mode .pdf-canvas-container::-webkit-scrollbar-thumb:hover {
+            background: #777;
+        }
+
+        body.dark-mode .pdf-canvas-container {
+            background: #1a1a1a;
+        }
+
+        #pdf-preview-canvas {
+            display: block;
+            margin: 0;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+            background: white;
+            max-width: none !important;
+            width: auto !important;
+            height: auto !important;
+            flex-shrink: 0;
+        }
+
+        .zoom-controls {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: white;
+            padding: 6px 10px;
+            border-radius: 6px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        body.dark-mode .zoom-controls {
+            background: #2d2d2d;
+        }
+
+        .zoom-btn {
+            width: 32px;
+            height: 32px;
+            border: none;
+            background: linear-gradient(135deg, #3b4245 0%, #7d8282 100%);
+            color: white;
+            border-radius: 6px;
+            font-size: 18px;
+            font-weight: bold;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s ease-out;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.15);
+        }
+
+        .zoom-btn:hover {
+            background: linear-gradient(135deg, #2d3537 0%, #6a6e6e 100%);
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.25);
+        }
+
+        .zoom-btn:active {
+            transform: scale(0.97) translateY(1px);
+            transition-duration: 0.1s;
+        }
+
+        body.dark-mode .zoom-btn {
+            background: linear-gradient(135deg, #2a2a2a 0%, #7d7d7d 100%);
+        }
+
+        body.dark-mode .zoom-btn:hover {
+            background: linear-gradient(135deg, #1a1a1a 0%, #6a6a6a 100%);
+        }
+
+        .zoom-level {
+            min-width: 50px;
+            text-align: center;
+            font-weight: 600;
+            color: #2c3e50;
+            font-size: 14px;
+        }
+
+        body.dark-mode .zoom-level {
+            color: #e0e0e0;
+        }
+
+        .input-section {
+            flex: 0 1 400px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            min-height: 0;
+            min-width: 320px;
+            max-width: 450px;
+            overflow: visible;
+        }
+
+        .description {
+            background: #fff3cd;
+            border: 1px solid #ffc107;
+            border-radius: 6px;
+            padding: 10px;
+            font-size: 0.85rem;
+            color: #856404;
+        }
+
+        body.dark-mode .description {
+            background: #3a3a00;
+            border-color: #8b8000;
+            color: #ffd966;
+        }
+
+        .form-group {
+            background: white;
+            border-radius: 8px;
+            padding: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        body.dark-mode .form-group {
+            background: #2d2d2d;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #2c3e50;
+            font-size: 0.95rem;
+        }
+
+        body.dark-mode .form-group label {
+            color: #b0b0b0;
+        }
+
+        .doc-type-select,
+        .input-field {
+            width: 100%;
+            padding: 10px;
+            border: 2px solid #ddd;
+            border-radius: 6px;
+            font-size: 1rem;
+            box-sizing: border-box;
+            transition: border-color 0.2s;
+        }
+
+        body.dark-mode .doc-type-select,
+        body.dark-mode .input-field {
+            background: #1a1a1a;
+            border-color: #444;
+            color: #e0e0e0;
+        }
+
+        .doc-type-select:focus,
+        .input-field:focus {
+            outline: none;
+            border-color: #3498db;
+        }
+
+        .doc-type-select.field-error,
+        .input-field.field-error {
+            border-color: #e74c3c !important;
+            background-color: rgba(231, 76, 60, 0.06) !important;
+        }
+
+        body.dark-mode .doc-type-select.field-error,
+        body.dark-mode .input-field.field-error {
+            background-color: rgba(231, 76, 60, 0.12) !important;
+        }
+
+        .field-error-msg {
+            display: none;
+            color: #e74c3c;
+            font-size: 0.78rem;
+            margin-top: 5px;
+            font-weight: 500;
+        }
+
+        .field-error-msg.visible {
+            display: block;
+        }
+
+        .input-row {
+            display: flex;
+            gap: 10px;
+            align-items: flex-start;
+        }
+
+        .input-group {
+            flex: 1;
+        }
+
+        .separator {
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: #7f8c8d;
+            padding-top: 28px;
+        }
+
+        .preview-name {
+            background: #e8f5e9;
+            border: 2px solid #4caf50;
+            border-radius: 6px;
+            padding: 10px;
+            font-size: 0.9rem;
+            word-break: break-all;
+            text-align: center;
+        }
+
+        body.dark-mode .preview-name {
+            background: #1b3a1b;
+            border-color: #2d6b2d;
+        }
+
+        .preview-name strong {
+            color: #2e7d32;
+        }
+
+        body.dark-mode .preview-name strong {
+            color: #66bb6a;
+        }
+
+        #preview-filename {
+            color: #1b5e20;
+            font-weight: 600;
+        }
+
+        body.dark-mode #preview-filename {
+            color: #81c784;
+        }
+
+        .original-name {
+            background: #e3f2fd;
+            border: 2px solid #2196f3;
+            border-radius: 6px;
+            padding: 10px;
+            font-size: 0.9rem;
+            word-break: break-all;
+            text-align: center;
+        }
+
+        body.dark-mode .original-name {
+            background: #1a2a3a;
+            border-color: #1976d2;
+        }
+
+        .original-name strong {
+            color: #1565c0;
+        }
+
+        body.dark-mode .original-name strong {
+            color: #64b5f6;
+        }
+
+        #original-filename {
+            color: #0d47a1;
+            font-weight: 600;
+        }
+
+        body.dark-mode #original-filename {
+            color: #90caf9;
+        }
+
+        .actions {
+            display: flex;
+            gap: 10px;
+            margin-top: auto;
+            padding: 15px 5px 15px 5px;
+        }
+
+        .btn {
+            flex: 1;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 25px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease-out;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+        }
+
+        .btn:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 6px 16px rgba(0,0,0,0.25);
+        }
+
+        .btn:active {
+            transform: scale(0.97) translateY(1px);
+            transition-duration: 0.1s;
+        }
+
+        .btn-secondary {
+            background: linear-gradient(135deg, #95a5a6 0%, #7f8c8d 100%);
+            color: white;
+        }
+
+        .btn-secondary:hover {
+            background: linear-gradient(135deg, #7f8c8d 0%, #6c7a7b 100%);
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #3b4245 0%, #7d8282 100%);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: linear-gradient(135deg, #2d3537 0%, #6a6e6e 100%);
+        }
+
+        body.dark-mode .btn-primary {
+            background: linear-gradient(135deg, #2a2a2a 0%, #7d7d7d 100%);
+        }
+
+        body.dark-mode .btn-primary:hover {
+            background: linear-gradient(135deg, #1a1a1a 0%, #6a6a6a 100%);
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .btn:disabled:hover {
+            transform: none;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+        }
+    </style>
+</head>
+<body>
+    <div class="manual-rename-container">
+        <div class="header">
+            <h2>Renombrado Manual</h2>
+            <span id="queue-badge" class="queue-badge" style="display: none;"></span>
+        </div>
+
+        <div class="content">
+            <div class="pdf-preview-section">
+                <h3 style="margin: 0 0 10px 0;">Vista previa del documento</h3>
+                <div class="zoom-controls" style="margin-bottom: 10px;">
+                    <button class="zoom-btn" id="btn-zoom-out" title="Reducir zoom">-</button>
+                    <span id="zoom-level" class="zoom-level">200%</span>
+                    <button class="zoom-btn" id="btn-zoom-in" title="Aumentar zoom">+</button>
+                    <button class="zoom-btn" id="btn-zoom-reset" title="Restablecer zoom">↻</button>
+                </div>
+                <div class="pdf-canvas-container">
+                    <canvas id="pdf-preview-canvas"></canvas>
+                </div>
+            </div>
+
+            <div class="input-section">
+                <div id="auto-detect-message" class="description" style="display: none;">
+                    No se pudo detectar el número automáticamente. Por favor, introduce los datos manualmente.
+                </div>
+
+                <div id="doc-type-selector" class="form-group" style="display: none;">
+                    <label>Tipo de documento:</label>
+                    <select id="manual-doc-type" class="doc-type-select">
+                        <option value="">-- Selecciona el tipo --</option>
+                        <option value="albaranes">📋 Albarán de Venta</option>
+                        <option value="pedidos">📦 Pedido de Cliente</option>
+                        <option value="duas">📄 DUA</option>
+                        <option value="facturas">🧾 Factura</option>
+                        <option value="entradas">📥 Entrada</option>
+                    </select>
+                    <span id="error-doc-type" class="field-error-msg"></span>
+                </div>
+
+                <div class="form-group">
+                    <label>Número de documento:</label>
+                    <div class="input-row">
+                        <div class="input-group">
+                            <label>Serie (1 dígito):</label>
+                            <input type="text" id="manual-serie" class="input-field" maxlength="1" inputmode="numeric" placeholder="Ej: 3">
+                            <span id="error-serie" class="field-error-msg"></span>
+                        </div>
+                        <span class="separator">-</span>
+                        <div class="input-group">
+                            <label>Código:</label>
+                            <input type="text" id="manual-codigo" class="input-field" inputmode="numeric" placeholder="Ej: 001231">
+                            <span id="error-codigo" class="field-error-msg"></span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="original-name">
+                    <strong>Nombre original:</strong> <span id="original-filename">-</span>
+                </div>
+
+                <div class="preview-name">
+                    <strong>Nombre final:</strong> <span id="preview-filename">-</span>
+                </div>
+
+                <div class="actions">
+                    <button class="btn btn-secondary" id="btn-skip">Omitir archivo</button>
+                    <button class="btn btn-primary" id="btn-confirm">Confirmar y Renombrar</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="manual-rename-window.js"></script>
+</body>
+</html>

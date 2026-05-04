@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Configuración</title>
+    <link rel="stylesheet" href="styles.css">
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+        }
+        .modal-content {
+            width: 100% !important;
+            max-width: none !important;
+            height: 100vh;
+            max-height: none !important;
+            border-radius: 0;
+            box-shadow: none;
+        }
+
+        /* Estilos personalizados para configuración */
+        .settings-section {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+            height: 100%;
+        }
+
+        body.dark-mode .settings-section {
+            background: #2d2d2d;
+            box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
+        }
+
+        .settings-section-title {
+            font-size: 1.05rem;
+            font-weight: 600;
+            color: #2c3e50;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        body.dark-mode .settings-section-title {
+            color: #e0e0e0;
+        }
+
+        .settings-icon {
+            font-size: 1.4rem;
+        }
+
+        .folder-config-item {
+            background: #f8f9fa;
+            border: 1px solid #e0e0e0;
+            border-radius: 6px;
+            padding: 8px;
+            margin-bottom: 8px;
+            transition: all 0.2s ease;
+        }
+
+        .folder-config-item:last-child {
+            margin-bottom: 0;
+        }
+
+        .folder-config-item:hover {
+            border-color: #3b4245;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+        }
+
+        body.dark-mode .folder-config-item {
+            background: #1a1a1a;
+            border-color: #444;
+        }
+
+        body.dark-mode .folder-config-item:hover {
+            border-color: #7d8282;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+        }
+
+        .folder-label {
+            font-weight: 600;
+            color: #34495e;
+            font-size: 0.95rem;
+        }
+
+        body.dark-mode .folder-label {
+            color: #b0b0b0;
+        }
+
+        .input-group {
+            margin-bottom: 0;
+        }
+
+        /* Estilo unificado para los tres campos de la sección Procesamiento */
+        .settings-field {
+            width: 100%;
+            padding: 10px 12px;
+            border: 2px solid #d7d7d7 !important;
+            border-radius: 8px;
+            font-size: 0.95em;
+            background: #ffffff !important;
+            color: #3b4245 !important;
+            transition: border-color 0.2s, background 0.2s, color 0.2s;
+            box-sizing: border-box;
+        }
+
+        body.dark-mode .settings-field {
+            background: #1a1a1a !important;
+            border-color: #555 !important;
+            color: #f5f5f5 !important;
+        }
+    </style>
+</head>
+<body class="window-body">
+    <div class="modal-content modal-settings" style="display: block; position: relative;">
+        <div class="modal-header">
+            <h3>⚙️ Configuración</h3>
+        </div>
+        <div class="modal-body" style="padding: 25px 25px 20px 25px;">
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 25px; align-items: start;">
+                <div class="settings-section" style="display: flex; flex-direction: column; gap: 20px;">
+                    <div>
+                        <div class="settings-section-title">
+                            <span class="settings-icon">⚡</span>
+                            <span>Procesamiento</span>
+                        </div>
+
+                        <div class="input-group">
+                            <label for="concurrent-limit">Límite de procesamiento simultáneo:</label>
+                            <input type="text" inputmode="numeric" pattern="[0-9]*" id="concurrent-limit" class="settings-field" min="1" max="100" placeholder="Ej: 50">
+                            <p class="input-hint" style="margin-bottom: 5px;">Define cuántos archivos se procesan a la vez. (Recomendado: 10-50)</p>
+                            <p id="error-message" class="error-message" style="display: none; color: red; margin-top: 5px;"></p>
+                        </div>
+
+                        <div class="input-group" style="margin-top: 15px;">
+                            <label for="max-pages">Páginas a procesar por PDF:</label>
+                            <select id="max-pages" class="settings-field" style="cursor:pointer;">
+                                <option value="1">Solo página 1 — rápido</option>
+                                <option value="2">Hasta 2 páginas</option>
+                                <option value="3">Hasta 3 páginas</option>
+                                <option value="5">Hasta 5 páginas</option>
+                                <option value="0" selected>Todas las páginas (por defecto)</option>
+                            </select>
+                            <p class="input-hint" style="margin-top: 6px;">Más páginas mejora la detección en documentos largos, pero aumenta el tiempo de procesamiento.</p>
+                        </div>
+                    </div>
+
+                    <div>
+                        <div class="settings-section-title">
+                            <span class="settings-icon">👁️</span>
+                            <span>Carpeta Vigilada</span>
+                        </div>
+
+                        <div class="input-group">
+                            <label for="watch-folder">Carpeta de entrada:</label>
+                            <div style="display: flex; gap: 5px; align-items: center;">
+                                <input type="text" id="watch-folder" class="settings-field" readonly placeholder="Sin configurar">
+                                <button class="browse-btn-small" id="btn-select-watch-folder">📂</button>
+                                <button class="browse-btn-small" id="btn-clear-watch-folder" title="Eliminar carpeta vigilada">✕</button>
+                            </div>
+                            <p class="input-hint" style="margin-top: 8px;">Los PDFs nuevos en esta carpeta se procesarán y renombrarán automáticamente.</p>
+                        </div>
+                    </div>
+
+                    <div>
+                        <div class="settings-section-title">
+                            <span class="settings-icon">💾</span>
+                            <span>Índice de Búsqueda OCR</span>
+                        </div>
+
+                        <div class="input-group">
+                            <label for="ocr-index-path">Ubicación del archivo de índice:</label>
+                            <div style="display: flex; gap: 5px; align-items: center;">
+                                <input type="text" id="ocr-index-path" class="settings-field" readonly placeholder="Ubicación por defecto" style="flex: 1;">
+                                <button class="browse-btn-small" id="btn-select-ocr-location">📂</button>
+                                <button class="browse-btn-small" id="btn-reset-ocr-location" title="Restaurar ubicación por defecto">↻</button>
+                            </div>
+                            <p class="input-hint" style="margin-top: 8px;">Archivo JSON donde se guarda el índice de textos extraídos de los PDFs para búsqueda.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="settings-section" style="display: flex; flex-direction: column;">
+                    <div class="settings-section-title">
+                        <span class="settings-icon">📁</span>
+                        <span>Carpetas para Detección Automática</span>
+                        <button class="lock-btn" id="lock-folders" title="Bloquear/Desbloquear configuración" style="margin-left: auto;">
+                            🔒
+                        </button>
+                    </div>
+
+                    <div id="multi-folder-selector" style="margin: 0;">
+
+                        <div class="folder-config-item">
+                            <span class="folder-label">📋 Albaranes:</span>
+                            <div class="folder-input-group">
+                                <input type="text" id="folder-albaranes" class="folder-input" readonly placeholder="Sin configurar">
+                                <button class="browse-btn-small folder-browse-btn" data-folder-type="albaranes" disabled>📂</button>
+                            </div>
+                        </div>
+
+                        <div class="folder-config-item">
+                            <span class="folder-label">📦 Pedidos:</span>
+                            <div class="folder-input-group">
+                                <input type="text" id="folder-pedidos" class="folder-input" readonly placeholder="Sin configurar">
+                                <button class="browse-btn-small folder-browse-btn" data-folder-type="pedidos" disabled>📂</button>
+                            </div>
+                        </div>
+
+                        <div class="folder-config-item">
+                            <span class="folder-label">📄 DUAs:</span>
+                            <div class="folder-input-group">
+                                <input type="text" id="folder-duas" class="folder-input" readonly placeholder="Sin configurar">
+                                <button class="browse-btn-small folder-browse-btn" data-folder-type="duas" disabled>📂</button>
+                            </div>
+                        </div>
+
+                        <div class="folder-config-item">
+                            <span class="folder-label">🧾 Facturas:</span>
+                            <div class="folder-input-group">
+                                <input type="text" id="folder-facturas" class="folder-input" readonly placeholder="Sin configurar">
+                                <button class="browse-btn-small folder-browse-btn" data-folder-type="facturas" disabled>📂</button>
+                            </div>
+                        </div>
+
+                        <div class="folder-config-item">
+                            <span class="folder-label">📥 Entradas:</span>
+                            <div class="folder-input-group">
+                                <input type="text" id="folder-entradas" class="folder-input" readonly placeholder="Sin configurar">
+                                <button class="browse-btn-small folder-browse-btn" data-folder-type="entradas" disabled>📂</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" id="btn-cancel">Cancelar</button>
+            <button class="btn btn-primary" id="btn-save">Guardar Cambios</button>
+        </div>
+    </div>
+
+    <script src="settings-window.js"></script>
+</body>
+</html>

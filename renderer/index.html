@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Procesador de PDFs</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/4.1.1/tesseract.min.js"></script>
+</head>
+<body>
+    <div class="app-container">
+        <div class="header">
+            <div class="logo-section">
+                <div class="logo-placeholder">
+                    <img src="logo.png" alt="Logo Empresa" class="logo-light">
+                    <img src="logo-dark.png" alt="Logo Empresa" class="logo-dark">
+                </div>
+                <div class="title-section">
+                    <h1>Procesador de PDFs</h1>
+                    <p>Renombra automáticamente tus documentos</p>
+                </div>
+            </div>
+            <div class="header-actions">
+                <button class="change-mode-btn-header" id="change-mode-header" style="display: none;">
+                    ← Cambiar tipo
+                </button>
+                <button class="search-btn" id="btn-search" title="Buscar en documentos">
+                    🔍
+                </button>
+
+                <button class="theme-toggle" id="btn-theme-toggle">
+                    <span id="theme-icon">☀️</span>
+                </button>
+            </div>
+        </div>
+
+        <div id="selection-screen" class="selection-screen">
+            <h2>¿Qué tipo de documento deseas procesar?</h2>
+            <div class="selection-buttons">
+                <button class="selection-btn" data-mode="auto">
+                    <div class="btn-icon">🤖</div>
+                    <div class="btn-title">Detección Automática</div>
+                    <div class="btn-description">Identifica el tipo de documento automáticamente</div>
+                </button>
+
+                <button class="selection-btn" data-mode="albaranes">
+                    <div class="btn-icon">📋</div>
+                    <div class="btn-title">Albaranes de Venta</div>
+                    <div class="btn-description">Formato: 1 013770 → 1-13770 ALBARAN.pdf</div>
+                </button>
+
+                <button class="selection-btn" data-mode="pedidos">
+                    <div class="btn-icon">📦</div>
+                    <div class="btn-title">Pedidos de Clientes</div>
+                    <div class="btn-description">Detecta RESTO/RESTOS automáticamente</div>
+                </button>
+
+                <button class="selection-btn" data-mode="duas">
+                    <div class="btn-icon">📄</div>
+                    <div class="btn-title">DUAs</div>
+                    <div class="btn-description">Formato: 1 013770 → 1-13770 DUA.pdf</div>
+                </button>
+
+                <button class="selection-btn" data-mode="facturas">
+                    <div class="btn-icon">🧾</div>
+                    <div class="btn-title">Facturas</div>
+                    <div class="btn-description">Formato: 1 013770 → 1-13770 FACTURA.pdf</div>
+                </button>
+
+                <button class="selection-btn" data-mode="entradas">
+                    <div class="btn-icon">📥</div>
+                    <div class="btn-title">Entradas</div>
+                    <div class="btn-description">Formato: 1 013770 → 1-13770 ENTRADA.pdf</div>
+                </button>
+            </div>
+        </div>
+
+        <div id="processing-screen" class="processing-screen" style="display: none;">
+            <div class="processing-container">
+                <div class="left-panel">
+                    <div class="mode-header">
+                        <div class="mode-icon" id="mode-icon">📋</div>
+                        <div>
+                            <h2 id="mode-title">Albaranes de Venta</h2>
+                            <p id="mode-description" class="mode-desc">Formato: 1 013770 → 1-13770 ALBARAN.pdf</p>
+                        </div>
+                    </div>
+
+                    <div class="folder-selector" id="single-folder-selector">
+                        <div class="folder-header">
+                            <label>📁 Guardar en:</label>
+                            <button class="lock-btn" id="lock-single" title="Bloquear/Desbloquear configuración">
+                                🔓
+                            </button>
+                        </div>
+                        <div class="folder-input-group">
+                            <input type="text" id="destination-folder" class="folder-input" readonly placeholder="Selecciona carpeta destino...">
+                            <button class="browse-btn" id="browse-single" disabled>📂</button>
+                        </div>
+                    </div>
+
+                    <div class="upload-zone" id="upload-area">
+                        <div class="upload-icon">📁</div>
+                        <h3>Arrastra PDFs aquí</h3>
+                        <p>o haz clic para seleccionar</p>
+                        <input type="file" id="file-input" multiple accept=".pdf">
+                    </div>
+                </div>
+
+                <div class="right-panel">
+                    <div class="panel-header">
+                        <h3>📄 Archivos Procesados</h3>
+                        <span id="file-counter" class="file-counter">0 archivos</span>
+                    </div>
+                    <div id="file-list" class="file-list"></div>
+                </div>
+            </div>
+        </div>
+
+
+        <div class="footer">
+            <div class="copyright-container">
+                <p>© 2025 Procesador de PDFs</p>
+            </div>
+            <button class="settings-btn" id="btn-settings" title="Configuración">⚙️</button>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

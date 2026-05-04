@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Búsqueda de Documentos</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            height: 100vh;
+        }
+        .modal-content {
+            width: 100% !important;
+            max-width: none !important;
+            height: 100vh !important;
+            max-height: 100vh !important;
+            border-radius: 0;
+            box-shadow: none;
+            display: flex !important;
+            flex-direction: column !important;
+        }
+        .modal-header {
+            flex-shrink: 0;
+        }
+        .modal-body {
+            flex: 1 !important;
+            min-height: 0 !important;
+            overflow: hidden !important;
+            display: flex !important;
+            flex-direction: column !important;
+        }
+        .search-container {
+            flex: 1 !important;
+            min-height: 0 !important;
+            display: flex !important;
+        }
+        .search-box {
+            flex-shrink: 0;
+        }
+        .search-results {
+            flex: 1 !important;
+            min-height: 0 !important;
+            overflow-y: scroll !important;
+        }
+    </style>
+</head>
+<body class="window-body">
+    <div class="modal-content modal-search" style="display: block; position: relative;">
+        <div class="modal-header">
+            <h3>🔍 Búsqueda Avanzada en Documentos</h3>
+        </div>
+        <div class="modal-body">
+            <div class="search-container">
+                <div class="search-box">
+                    <div class="search-instructions">
+                        Introduce uno o más términos de búsqueda. Los documentos deben contener <strong>todos</strong> los términos introducidos.
+                    </div>
+
+                    <div class="search-fields-grid">
+                        <div class="search-field-item">
+                            <label for="search-input-1">🔎 Término 1:</label>
+                            <input type="text" id="search-input-1" class="search-input-multi" placeholder="Ej: ANCORA">
+                        </div>
+
+                        <div class="search-field-item">
+                            <label for="search-input-2">🔎 Término 2:</label>
+                            <input type="text" id="search-input-2" class="search-input-multi" placeholder="Ej: FACTURA">
+                        </div>
+
+                        <div class="search-field-item">
+                            <label for="search-input-3">🔎 Término 3:</label>
+                            <input type="text" id="search-input-3" class="search-input-multi" placeholder="Ej: 2025">
+                        </div>
+
+                        <div class="search-field-item">
+                            <label for="search-input-4">🔎 Término 4:</label>
+                            <input type="text" id="search-input-4" class="search-input-multi" placeholder="Ej: BOMBILLO">
+                        </div>
+                    </div>
+
+                    <div class="search-actions">
+                        <button class="btn-clear-search" id="btn-clear-search">🗑️ Limpiar campos</button>
+                        <span id="search-stats" class="search-stats">0 documentos indexados</span>
+                    </div>
+                </div>
+                <div id="search-results" class="search-results">
+                    <div class="search-empty">Introduce al menos un término de búsqueda</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="search-window.js"></script>
+</body>
+</html>
