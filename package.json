@@ -1,6 +1,6 @@
 {
   "name": "zilo",
-  "version": "2.0.1",
+  "version": "1.0.0",
   "description": "Procesador de PDFs",
   "main": "main.js",
   "author": "Pablo Couse Pena",
