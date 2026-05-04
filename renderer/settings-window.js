@@ -86,10 +86,14 @@ function applyCurrentTheme() {
 }
 
 function setupEventListeners() {
-    // Permitir cerrar con Escape solo si no es la primera vez
+    // Escuchar tecla Escape para cerrar o validar
     document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape' && !isFirstTime) {
-            closeWindow();
+        if (e.key === 'Escape') {
+            if (!isFirstTime) {
+                closeWindow();
+            } else {
+                validateFolders();
+            }
         }
     });
 
@@ -130,6 +134,44 @@ function setupEventListeners() {
 // =================================================================================
 
 /**
+ * Valida que todas las carpetas obligatorias estén configuradas durante la primera vez.
+ * @returns {boolean} True si todo es válido o no es la primera vez.
+ */
+function validateFolders() {
+    if (!isFirstTime) return true;
+
+    const folderIds = [
+        'folder-albaranes',
+        'folder-pedidos',
+        'folder-duas',
+        'folder-facturas',
+        'folder-entradas',
+        'watch-folder'
+    ];
+
+    let allValid = true;
+    folderIds.forEach(id => {
+        const input = document.getElementById(id);
+        if (!input || !input.value || input.value.trim() === '') {
+            input?.classList.add('input-error');
+            allValid = false;
+        } else {
+            input?.classList.remove('input-error');
+        }
+    });
+
+    const errorMessage = document.getElementById('error-message');
+    if (!allValid) {
+        errorMessage.textContent = 'Debe especificar todas las rutas de detección automática y la carpeta vigilada.';
+        errorMessage.style.display = 'block';
+    } else if (errorMessage.textContent.includes('rutas')) {
+        errorMessage.style.display = 'none';
+    }
+
+    return allValid;
+}
+
+/**
  * Guarda la configuración y notifica a la ventana principal.
  */
 function saveSettings() {
@@ -139,6 +181,11 @@ function saveSettings() {
     if (isNaN(newLimit) || newLimit < 1) {
         errorMessage.textContent = 'Por favor, introduce un número válido mayor que 0.';
         errorMessage.style.display = 'block';
+        return;
+    }
+
+    // Validar carpetas obligatorias si es la primera vez
+    if (isFirstTime && !validateFolders()) {
         return;
     }
 
@@ -182,8 +229,11 @@ function saveSettings() {
  * Cierra la ventana sin guardar.
  */
 function closeWindow() {
-    // No permitir cerrar si es la primera vez
-    if (isFirstTime) return;
+    // No permitir cerrar si es la primera vez y marcar errores
+    if (isFirstTime) {
+        validateFolders();
+        return;
+    }
     window.electronAPI.closeSettingsWindow();
 }
 
@@ -260,7 +310,9 @@ async function selectFolderForType(type) {
     const result = await window.electronAPI.selectFolder();
 
     if (result.success && result.folder) {
-        document.getElementById(`folder-${type}`).value = result.folder;
+        const input = document.getElementById(`folder-${type}`);
+        input.value = result.folder;
+        input.classList.remove('input-error');
 
         // Guardar en localStorage
         localStorage.setItem(`auto-folder-${type}`, result.folder);
@@ -356,7 +408,9 @@ async function resetOCRIndexLocation() {
 async function selectWatchFolder() {
     const result = await window.electronAPI.selectFolder();
     if (result.success && result.folder) {
-        document.getElementById('watch-folder').value = result.folder;
+        const input = document.getElementById('watch-folder');
+        input.value = result.folder;
+        input.classList.remove('input-error');
         localStorage.setItem('watch-folder', result.folder);
         console.log(`👁️ Carpeta vigilada configurada: ${result.folder}`);
     }

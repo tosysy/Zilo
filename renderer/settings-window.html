@@ -112,6 +112,11 @@
             border-color: #555 !important;
             color: #f5f5f5 !important;
         }
+
+        .input-error {
+            border-color: #dc2626 !important;
+            box-shadow: 0 0 0 2px rgba(220, 38, 38, 0.2) !important;
+        }
     </style>
 </head>
 <body class="window-body">
@@ -132,7 +137,6 @@
                             <label for="concurrent-limit">Límite de procesamiento simultáneo:</label>
                             <input type="text" inputmode="numeric" pattern="[0-9]*" id="concurrent-limit" class="settings-field" min="1" max="100" placeholder="Ej: 50">
                             <p class="input-hint" style="margin-bottom: 5px;">Define cuántos archivos se procesan a la vez. (Recomendado: 10-50)</p>
-                            <p id="error-message" class="error-message" style="display: none; color: red; margin-top: 5px;"></p>
                         </div>
 
                         <div class="input-group" style="margin-top: 15px;">
@@ -145,23 +149,6 @@
                                 <option value="0" selected>Todas las páginas (por defecto)</option>
                             </select>
                             <p class="input-hint" style="margin-top: 6px;">Más páginas mejora la detección en documentos largos, pero aumenta el tiempo de procesamiento.</p>
-                        </div>
-                    </div>
-
-                    <div>
-                        <div class="settings-section-title">
-                            <span class="settings-icon">👁️</span>
-                            <span>Carpeta Vigilada</span>
-                        </div>
-
-                        <div class="input-group">
-                            <label for="watch-folder">Carpeta de entrada:</label>
-                            <div style="display: flex; gap: 5px; align-items: center;">
-                                <input type="text" id="watch-folder" class="settings-field" readonly placeholder="Sin configurar">
-                                <button class="browse-btn-small" id="btn-select-watch-folder">📂</button>
-                                <button class="browse-btn-small" id="btn-clear-watch-folder" title="Eliminar carpeta vigilada">✕</button>
-                            </div>
-                            <p class="input-hint" style="margin-top: 8px;">Los PDFs nuevos en esta carpeta se procesarán y renombrarán automáticamente.</p>
                         </div>
                     </div>
 
@@ -233,13 +220,42 @@
                                 <button class="browse-btn-small folder-browse-btn" data-folder-type="entradas" disabled>📂</button>
                             </div>
                         </div>
+
+                    </div>
+
+                    <div style="margin-top: 16px;">
+                        <div class="settings-section-title" style="margin-bottom: 10px;">
+                            <span class="settings-icon">👁️</span>
+                            <span>Carpeta Vigilada</span>
+                        </div>
+                        <div class="folder-config-item">
+                            <span class="folder-label">Carpeta:</span>
+                            <div class="folder-input-group">
+                                <input type="text" id="watch-folder" class="folder-input" readonly placeholder="Sin configurar">
+                                <button class="browse-btn-small folder-browse-btn" id="btn-select-watch-folder" disabled>📂</button>
+                                <button class="browse-btn-small folder-browse-btn" id="btn-clear-watch-folder" title="Eliminar carpeta vigilada" disabled>✕</button>
+                            </div>
+                        </div>
+                        <p class="input-hint" style="margin-top: 6px; font-size: 0.78rem;">PDFs nuevos aquí se procesan y renombran automáticamente.</p>
                     </div>
                 </div>
             </div>
         </div>
-        <div class="modal-footer">
-            <button class="btn btn-secondary" id="btn-cancel">Cancelar</button>
-            <button class="btn btn-primary" id="btn-save">Guardar Cambios</button>
+        <div class="modal-footer" style="display: flex; align-items: center; padding: 15px 25px;">
+            <p id="error-message" style="display: none; color: #ef4444; margin: 0; flex: 1; font-size: 0.85rem; font-weight: 500; text-align: left;"></p>
+            <div style="display: flex; gap: 10px;">
+                <button class="btn btn-secondary" id="btn-cancel">Cancelar</button>
+                <button class="btn btn-primary" id="btn-save">Guardar Cambios</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="settings-window.js"></script>
+</body>
+</html>
+utton>
+                <button class="btn btn-primary" id="btn-save">Guardar Cambios</button>
+            </div>
         </div>
     </div>
 

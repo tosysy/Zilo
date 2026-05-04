@@ -350,6 +350,7 @@ async function handleFiles(files) {
  */
 async function processWatchedFile(fileData) {
     const file = { path: fileData.path, name: fileData.name };
+    console.log(`[WATCH] Iniciando procesamiento: "${file.name}" (${file.path})`);
 
     // Cargar carpetas destino desde localStorage
     const types = ['albaranes', 'pedidos', 'duas', 'facturas', 'entradas'];
@@ -357,10 +358,11 @@ async function processWatchedFile(fileData) {
         const folder = localStorage.getItem(`auto-folder-${type}`);
         if (folder) destinationFolders[type] = folder;
     });
+    console.log('[WATCH] Carpetas destino cargadas:', destinationFolders);
 
     const missingAll = types.every(t => !destinationFolders[t]);
     if (missingAll) {
-        console.warn('[WATCH] No hay carpetas destino configuradas, ignorando:', file.name);
+        console.error('[WATCH] ❌ No hay carpetas destino configuradas, ignorando:', file.name);
         return;
     }
 
@@ -373,24 +375,31 @@ async function processWatchedFile(fileData) {
     processedFiles.add(file.path);
 
     try {
+        console.log('[WATCH] Leyendo PDF...');
         updateFileStatus(fileId, 'Extrayendo texto...', 30);
         const text = await extractTextFromPDF(file);
+        console.log(`[WATCH] Texto extraído (${text.length} chars):`, text.substring(0, 300));
 
         updateFileStatus(fileId, 'Analizando contenido...', 60);
         const detectedMode = detectDocumentType(text);
+        console.log('[WATCH] Tipo detectado:', detectedMode || 'ninguno');
 
         if (!detectedMode) {
+            console.warn('[WATCH] ⚠️ No se detectó tipo, enviando a renombrado manual');
             await queueForManualRename(file, fileId, null, text, true);
             return;
         }
 
         const orderNumber = extractOrderNumber(text, detectedMode);
+        console.log('[WATCH] Número de orden extraído:', orderNumber || 'no encontrado');
 
         if (orderNumber) {
             const newFileName = generateNewFilename(orderNumber, detectedMode, text);
             const targetFolder = destinationFolders[detectedMode];
+            console.log(`[WATCH] Renombrando a "${newFileName}", destino: "${targetFolder}"`);
 
             if (!targetFolder) {
+                console.error(`[WATCH] ❌ Sin carpeta configurada para tipo "${detectedMode}"`);
                 updateFileStatus(fileId, `❌ Sin carpeta configurada para ${detectedMode}`, 100, 'error');
                 return;
             }
@@ -399,20 +408,23 @@ async function processWatchedFile(fileData) {
             const result = await window.electronAPI.moveFile(
                 file.path, targetFolder, newFileName, detectedMode === 'pedidos'
             );
+            console.log('[WATCH] Resultado moveFile:', result);
 
             if (result.success) {
                 updateFileStatus(fileId, `✅ Movido: ${newFileName}`, 100, 'success');
                 fileCounter++;
                 updateFileCounter();
                 await saveToOCRIndex(result.newPath, newFileName, text, detectedMode);
+                console.log('[WATCH] ✅ Procesamiento completado:', newFileName);
             } else {
                 throw new Error(result.error);
             }
         } else {
+            console.warn('[WATCH] ⚠️ Número no encontrado, enviando a renombrado manual');
             await queueForManualRename(file, fileId, detectedMode, text, true);
         }
     } catch (error) {
-        console.error(`❌ Error procesando archivo vigilado (${file.name}):`, error);
+        console.error(`[WATCH] ❌ Error procesando "${file.name}":`, error);
         updateFileStatus(fileId, `❌ Error: ${error.message}`, 100, 'error');
     }
 }

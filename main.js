@@ -9,8 +9,9 @@ let manualRenameWindow = null;
 let customOCRIndexPath = null; // Ruta personalizada del índice OCR
 
 // Watch folder state
-let watchFolderInterval = null;
+let watchFolderWatcher = null;
 let watchedFiles = new Set();
+const pendingWatchDebounce = new Map();
 
 async function startWatchFolder(folderPath) {
   stopWatchFolder();
@@ -28,45 +29,58 @@ async function startWatchFolder(folderPath) {
     console.warn('[WATCH] No se pudo escanear la carpeta inicial:', e.message);
   }
 
-  watchFolderInterval = setInterval(async () => {
-    try {
-      const files = await fs.readdir(folderPath);
-      const pdfs = files.filter(f => f.toLowerCase().endsWith('.pdf'));
+  try {
+    watchFolderWatcher = require('fs').watch(folderPath, (eventType, filename) => {
+      if (!filename || !filename.toLowerCase().endsWith('.pdf')) return;
 
-      for (const filename of pdfs) {
-        const fullPath = path.join(folderPath, filename);
-        if (!watchedFiles.has(fullPath)) {
-          watchedFiles.add(fullPath);
-          console.log('[WATCH] Nuevo archivo detectado:', fullPath);
+      const fullPath = path.join(folderPath, filename);
+      if (watchedFiles.has(fullPath)) return;
 
-          // Esperar 3s para que el archivo esté completamente escrito
-          setTimeout(async () => {
-            try {
-              const stat = await fs.stat(fullPath);
-              if (stat.size > 0) {
-                if (mainWindow && !mainWindow.isDestroyed()) {
-                  mainWindow.webContents.send('watched-file-detected', { path: fullPath, name: filename });
-                }
-              } else {
-                watchedFiles.delete(fullPath); // Reintentar en el próximo ciclo
-              }
-            } catch (e) {
-              watchedFiles.delete(fullPath); // Reintentar si no es accesible aún
-            }
-          }, 3000);
-        }
+      // Debounce: el SO puede disparar varios eventos por el mismo archivo
+      if (pendingWatchDebounce.has(fullPath)) {
+        clearTimeout(pendingWatchDebounce.get(fullPath));
       }
-    } catch (e) {
-      console.error('[WATCH] Error al escanear carpeta:', e.message);
-    }
-  }, 5000);
+
+      const timer = setTimeout(async () => {
+        pendingWatchDebounce.delete(fullPath);
+        if (watchedFiles.has(fullPath)) return;
+        watchedFiles.add(fullPath);
+
+        try {
+          const stat = await fs.stat(fullPath);
+          if (stat.size > 0) {
+            console.log('[WATCH] Nuevo archivo listo:', fullPath);
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('watched-file-detected', { path: fullPath, name: filename });
+            }
+          } else {
+            watchedFiles.delete(fullPath); // Archivo vacío, reintentar si vuelve a aparecer
+          }
+        } catch (e) {
+          watchedFiles.delete(fullPath); // No accesible aún, reintentar
+        }
+      }, 1500); // 1.5s para que el archivo esté completamente escrito
+
+      pendingWatchDebounce.set(fullPath, timer);
+    });
+
+    watchFolderWatcher.on('error', (e) => {
+      console.error('[WATCH] Error en el watcher:', e.message);
+    });
+
+    console.log('[WATCH] Vigilancia activa en tiempo real');
+  } catch (e) {
+    console.error('[WATCH] Error al iniciar vigilancia:', e.message);
+  }
 }
 
 function stopWatchFolder() {
-  if (watchFolderInterval) {
-    clearInterval(watchFolderInterval);
-    watchFolderInterval = null;
+  if (watchFolderWatcher) {
+    watchFolderWatcher.close();
+    watchFolderWatcher = null;
   }
+  pendingWatchDebounce.forEach(t => clearTimeout(t));
+  pendingWatchDebounce.clear();
   watchedFiles.clear();
 }
 
@@ -143,11 +157,11 @@ function openSettingsWindowFirstTime() {
   return new Promise((resolve) => {
     const { width, height } = screen.getPrimaryDisplay().workAreaSize;
     const x = Math.round((width / 2) - (1100 / 2));
-    const y = Math.round((height / 2) - (600 / 2));
+    const y = Math.round((height / 2) - (716 / 2));
 
     settingsWindow = new BrowserWindow({
       width: 1100,
-      height: 600,
+      height: 716,
       x,
       y,
       parent: mainWindow,
@@ -630,11 +644,11 @@ ipcMain.handle('open-settings-window', async (event) => {
 
     const { width, height } = screen.getPrimaryDisplay().workAreaSize;
     const x = Math.round((width / 2) - (1100 / 2));
-    const y = Math.round((height / 2) - (600 / 2));
+    const y = Math.round((height / 2) - (716 / 2));
 
     settingsWindow = new BrowserWindow({
       width: 1100,
-      height: 600,
+      height: 716,
       x,
       y,
       parent: mainWindow,
