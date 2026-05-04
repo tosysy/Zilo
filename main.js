@@ -157,11 +157,11 @@ function openSettingsWindowFirstTime() {
   return new Promise((resolve) => {
     const { width, height } = screen.getPrimaryDisplay().workAreaSize;
     const x = Math.round((width / 2) - (1100 / 2));
-    const y = Math.round((height / 2) - (716 / 2));
+    const y = Math.round((height / 2) - (800 / 2));
 
     settingsWindow = new BrowserWindow({
       width: 1100,
-      height: 716,
+      height: 800,
       x,
       y,
       parent: mainWindow,
@@ -644,11 +644,11 @@ ipcMain.handle('open-settings-window', async (event) => {
 
     const { width, height } = screen.getPrimaryDisplay().workAreaSize;
     const x = Math.round((width / 2) - (1100 / 2));
-    const y = Math.round((height / 2) - (716 / 2));
+    const y = Math.round((height / 2) - (800 / 2));
 
     settingsWindow = new BrowserWindow({
       width: 1100,
-      height: 716,
+      height: 800,
       x,
       y,
       parent: mainWindow,
@@ -704,6 +704,7 @@ ipcMain.on('close-settings-window', () => {
       concurrentLimit: localStorage.getItem("concurrentLimit") || "50",
       ocrIndexPath: localStorage.getItem("ocr-index-path") || "",
       watchFolder: localStorage.getItem("watch-folder") || "",
+      watchErrorFolder: localStorage.getItem("watch-error-folder") || "",
       folders: {
         albaranes: localStorage.getItem("auto-folder-albaranes") || "",
         pedidos: localStorage.getItem("auto-folder-pedidos") || "",
@@ -717,6 +718,7 @@ ipcMain.on('close-settings-window', () => {
           concurrentLimit: parseInt(settings.concurrentLimit, 10),
           ocrIndexPath: settings.ocrIndexPath,
           watchFolder: settings.watchFolder,
+          watchErrorFolder: settings.watchErrorFolder,
           folders: settings.folders
         });
       }
@@ -789,6 +791,10 @@ ipcMain.on('settings-saved', (event, settings) => {
       localStorage.setItem('watch-folder', ${JSON.stringify(settings.watchFolder || '')});
     ` : '';
 
+    const watchErrorFolderJS = settings.watchErrorFolder !== undefined ? `
+      localStorage.setItem('watch-error-folder', ${JSON.stringify(settings.watchErrorFolder || '')});
+    ` : '';
+
     // Iniciar o detener vigilancia de carpeta
     if (settings.watchFolder !== undefined) {
       if (settings.watchFolder && settings.watchFolder.trim() !== '') {
@@ -807,6 +813,7 @@ ipcMain.on('settings-saved', (event, settings) => {
       ${ocrIndexPathJS}
       ${maxPagesJS}
       ${watchFolderJS}
+      ${watchErrorFolderJS}
     `);
   }
 });

@@ -40,6 +40,12 @@ window.electronAPI.onLoadSettings((settings) => {
         if (settings.watchFolder) localStorage.setItem('watch-folder', settings.watchFolder);
     }
 
+    // Cargar la carpeta de incidencias
+    if (settings.watchErrorFolder !== undefined) {
+        document.getElementById('watch-error-folder').value = settings.watchErrorFolder || '';
+        if (settings.watchErrorFolder) localStorage.setItem('watch-error-folder', settings.watchErrorFolder);
+    }
+
     // Cargar las carpetas configuradas
     if (settings.folders) {
         const types = ['albaranes', 'pedidos', 'duas', 'facturas', 'entradas'];
@@ -127,6 +133,8 @@ function setupEventListeners() {
     // Event listeners para carpeta vigilada
     document.getElementById('btn-select-watch-folder').addEventListener('click', selectWatchFolder);
     document.getElementById('btn-clear-watch-folder').addEventListener('click', clearWatchFolder);
+    document.getElementById('btn-select-watch-error-folder').addEventListener('click', selectWatchErrorFolder);
+    document.getElementById('btn-clear-watch-error-folder').addEventListener('click', clearWatchErrorFolder);
 }
 
 // =================================================================================
@@ -134,37 +142,68 @@ function setupEventListeners() {
 // =================================================================================
 
 /**
- * Valida que todas las carpetas obligatorias estén configuradas durante la primera vez.
- * @returns {boolean} True si todo es válido o no es la primera vez.
+ * Valida que todas las carpetas obligatorias estén configuradas.
+ * @returns {boolean} True si todo es válido.
  */
 function validateFolders() {
-    if (!isFirstTime) return true;
-
     const folderIds = [
         'folder-albaranes',
         'folder-pedidos',
         'folder-duas',
         'folder-facturas',
-        'folder-entradas',
-        'watch-folder'
+        'folder-entradas'
     ];
 
+    const watchFolder = document.getElementById('watch-folder').value.trim();
+    const watchErrorFolder = document.getElementById('watch-error-folder').value.trim();
+
     let allValid = true;
-    folderIds.forEach(id => {
-        const input = document.getElementById(id);
-        if (!input || !input.value || input.value.trim() === '') {
-            input?.classList.add('input-error');
-            allValid = false;
-        } else {
-            input?.classList.remove('input-error');
-        }
-    });
+    
+    // Si es la primera vez, las de detección automática son obligatorias
+    if (isFirstTime) {
+        folderIds.forEach(id => {
+            const input = document.getElementById(id);
+            if (!input || !input.value || input.value.trim() === '') {
+                input?.classList.add('input-error');
+                allValid = false;
+            } else {
+                input?.classList.remove('input-error');
+            }
+        });
+    }
+
+    // Validación cruzada para watch folder e incidencias
+    const watchInput = document.getElementById('watch-folder');
+    const errorInput = document.getElementById('watch-error-folder');
+
+    if ((watchFolder !== '' && watchErrorFolder === '') || (watchFolder === '' && watchErrorFolder !== '')) {
+        watchInput.classList.add('input-error');
+        errorInput.classList.add('input-error');
+        allValid = false;
+        
+        const errorMessage = document.getElementById('error-message');
+        errorMessage.textContent = 'Si configura una Carpeta Vigilada, debe especificar OBLIGATORIAMENTE una Carpeta de Incidencias (y viceversa).';
+        errorMessage.style.display = 'block';
+        return false;
+    } else {
+        watchInput.classList.remove('input-error');
+        errorInput.classList.remove('input-error');
+    }
+
+    // Si es la primera vez, la carpeta vigilada también es obligatoria según tu petición anterior
+    if (isFirstTime && watchFolder === '') {
+        watchInput.classList.add('input-error');
+        errorInput.classList.add('input-error');
+        allValid = false;
+    }
 
     const errorMessage = document.getElementById('error-message');
     if (!allValid) {
-        errorMessage.textContent = 'Debe especificar todas las rutas de detección automática y la carpeta vigilada.';
+        if (isFirstTime) {
+            errorMessage.textContent = 'Debe especificar todas las rutas de detección automática y configurar la carpeta vigilada junto con su carpeta de incidencias.';
+        }
         errorMessage.style.display = 'block';
-    } else if (errorMessage.textContent.includes('rutas')) {
+    } else {
         errorMessage.style.display = 'none';
     }
 
@@ -184,8 +223,8 @@ function saveSettings() {
         return;
     }
 
-    // Validar carpetas obligatorias si es la primera vez
-    if (isFirstTime && !validateFolders()) {
+    // Validar carpetas siempre ahora por la nueva restricción
+    if (!validateFolders()) {
         return;
     }
 
@@ -207,6 +246,7 @@ function saveSettings() {
     localStorage.setItem('max-pages-ocr', maxPages.toString());
 
     const watchFolder = document.getElementById('watch-folder').value || '';
+    const watchErrorFolder = document.getElementById('watch-error-folder').value || '';
 
     // Enviar configuración a la ventana principal
     window.electronAPI.saveSettings({
@@ -215,6 +255,7 @@ function saveSettings() {
         folders: folders,
         maxPages: maxPages,
         watchFolder: watchFolder,
+        watchErrorFolder: watchErrorFolder,
         isFirstTime: isFirstTime
     });
 
@@ -222,7 +263,6 @@ function saveSettings() {
     if (!isFirstTime) {
         window.electronAPI.closeSettingsWindow();
     }
-    // Si es la primera vez, la ventana principal se encargará de cerrar esta
 }
 
 /**
@@ -257,6 +297,12 @@ function loadFolderConfiguration() {
     const watchFolder = localStorage.getItem('watch-folder');
     if (watchFolder) {
         document.getElementById('watch-folder').value = watchFolder;
+    }
+
+    // Cargar carpeta de incidencias
+    const watchErrorFolder = localStorage.getItem('watch-error-folder');
+    if (watchErrorFolder) {
+        document.getElementById('watch-error-folder').value = watchErrorFolder;
     }
 }
 
@@ -423,4 +469,27 @@ function clearWatchFolder() {
     document.getElementById('watch-folder').value = '';
     localStorage.removeItem('watch-folder');
     console.log('👁️ Carpeta vigilada eliminada');
+}
+
+/**
+ * Selecciona la carpeta de incidencias para la vigilancia
+ */
+async function selectWatchErrorFolder() {
+    const result = await window.electronAPI.selectFolder();
+    if (result.success && result.folder) {
+        const input = document.getElementById('watch-error-folder');
+        input.value = result.folder;
+        input.classList.remove('input-error');
+        localStorage.setItem('watch-error-folder', result.folder);
+        console.log(`⚠️ Carpeta de incidencias configurada: ${result.folder}`);
+    }
+}
+
+/**
+ * Elimina la carpeta de incidencias
+ */
+function clearWatchErrorFolder() {
+    document.getElementById('watch-error-folder').value = '';
+    localStorage.removeItem('watch-error-folder');
+    console.log('⚠️ Carpeta de incidencias eliminada');
 }

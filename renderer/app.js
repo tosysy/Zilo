@@ -189,7 +189,8 @@ function selectMode(mode) {
         pedidos: { icon: '📦', title: 'Pedidos de Clientes', description: 'Detecta RESTO/RESTOS automáticamente' },
         duas: { icon: '📄', title: 'DUAs', description: 'Formato: 1/013770 → 1-13770 DUA.pdf' },
         facturas: { icon: '🧾', title: 'Facturas', description: 'Formato: 4/041258 → 4-41258 FACTURA.pdf' },
-        entradas: { icon: '📥', title: 'Entradas', description: 'Formato: 1/013770 → 1-13770 ENTRADA.pdf' }
+        entradas: { icon: '📥', title: 'Entradas', description: 'Formato: 1/013770 → 1-13770 ENTRADA.pdf' },
+        manual: { icon: '✍️', title: 'Renombrado Manual', description: 'Selecciona y renombra archivos manualmente' }
     };
     
     const config = modeConfig[mode];
@@ -197,20 +198,21 @@ function selectMode(mode) {
     document.getElementById('mode-title').textContent = config.title;
     document.getElementById('mode-description').textContent = config.description;
     
-    if (mode === 'auto') {
-        // En modo automático, no mostramos selector de carpetas en pantalla principal
-        // Las carpetas se configuran en el modal de Configuración
+    if (mode === 'auto' || mode === 'manual') {
+        // En modo automático o manual, no mostramos selector de carpetas en pantalla principal
         document.getElementById('single-folder-selector').style.display = 'none';
 
-        // Cargar las carpetas desde localStorage
-        const types = ['albaranes', 'pedidos', 'duas', 'facturas', 'entradas'];
-        types.forEach(type => {
-            const savedFolder = localStorage.getItem(`auto-folder-${type}`);
-            if (savedFolder) {
-                destinationFolders[type] = savedFolder;
-            }
-        });
-        console.log('🗂️ Carpetas cargadas para modo AUTO:', destinationFolders);
+        if (mode === 'auto') {
+            // Cargar las carpetas desde localStorage para modo auto
+            const types = ['albaranes', 'pedidos', 'duas', 'facturas', 'entradas'];
+            types.forEach(type => {
+                const savedFolder = localStorage.getItem(`auto-folder-${type}`);
+                if (savedFolder) {
+                    destinationFolders[type] = savedFolder;
+                }
+            });
+            console.log('🗂️ Carpetas cargadas para modo AUTO:', destinationFolders);
+        }
     } else {
         // En modos específicos, mostrar selector de carpeta único
         document.getElementById('single-folder-selector').style.display = 'block';
@@ -385,8 +387,16 @@ async function processWatchedFile(fileData) {
         console.log('[WATCH] Tipo detectado:', detectedMode || 'ninguno');
 
         if (!detectedMode) {
-            console.warn('[WATCH] ⚠️ No se detectó tipo, enviando a renombrado manual');
-            await queueForManualRename(file, fileId, null, text, true);
+            console.warn('[WATCH] ⚠️ No se detectó tipo, moviendo a carpeta de incidencias');
+            const errorFolder = localStorage.getItem('watch-error-folder');
+            if (errorFolder) {
+                updateFileStatus(fileId, '⚠️ Tipo no detectado, moviendo a incidencias...', 80);
+                await window.electronAPI.moveFile(file.path, errorFolder, file.name, false);
+                updateFileStatus(fileId, '⚠️ Movido a incidencias (Tipo no detectado)', 100, 'skipped');
+            } else {
+                console.error('[WATCH] ❌ No hay carpeta de incidencias configurada');
+                updateFileStatus(fileId, '❌ Error: Sin carpeta de incidencias', 100, 'error');
+            }
             return;
         }
 
@@ -420,8 +430,16 @@ async function processWatchedFile(fileData) {
                 throw new Error(result.error);
             }
         } else {
-            console.warn('[WATCH] ⚠️ Número no encontrado, enviando a renombrado manual');
-            await queueForManualRename(file, fileId, detectedMode, text, true);
+            console.warn('[WATCH] ⚠️ Número no encontrado, moviendo a carpeta de incidencias');
+            const errorFolder = localStorage.getItem('watch-error-folder');
+            if (errorFolder) {
+                updateFileStatus(fileId, '⚠️ Número no encontrado, moviendo a incidencias...', 80);
+                await window.electronAPI.moveFile(file.path, errorFolder, file.name, false);
+                updateFileStatus(fileId, '⚠️ Movido a incidencias (Número no encontrado)', 100, 'skipped');
+            } else {
+                console.error('[WATCH] ❌ No hay carpeta de incidencias configurada');
+                updateFileStatus(fileId, '❌ Error: Sin carpeta de incidencias', 100, 'error');
+            }
         }
     } catch (error) {
         console.error(`[WATCH] ❌ Error procesando "${file.name}":`, error);
@@ -434,6 +452,8 @@ async function processWatchedFile(fileData) {
  * @returns {boolean} - True si las carpetas son válidas, false en caso contrario.
  */
 function validateDestinationFolders() {
+    if (currentMode === 'manual') return true;
+
     if (currentMode === 'auto') {
         const types = ['albaranes', 'pedidos', 'duas', 'facturas', 'entradas'];
         const missingFolders = types.filter(type => !destinationFolders[type]);
@@ -473,6 +493,13 @@ async function processFile(file, fileId) {
         const text = await extractTextFromPDF(file);
         
         updateFileStatus(fileId, 'Analizando contenido...', 60);
+        
+        if (currentMode === 'manual') {
+            console.log(`✍️ Modo manual activo para ${file.name}, enviando a renombrado manual.`);
+            queueForManualRename(file, fileId, null, text);
+            return;
+        }
+
         let detectedMode = currentMode === 'auto' ? detectDocumentType(text) : currentMode;
         
         if (currentMode === 'auto' && !detectedMode) {
@@ -736,6 +763,9 @@ async function handleManualRenameConfirmed(data) {
             await processNextManualRename();
             return;
         }
+    } else if (currentMode === 'manual') {
+        // En modo manual, no se requiere carpeta destino, se renombra in-situ
+        targetFolder = null; 
     } else {
         targetFolder = currentMode === 'auto' ? destinationFolders[selectedType] : destinationFolder;
         if (!targetFolder) {
@@ -749,15 +779,22 @@ async function handleManualRenameConfirmed(data) {
     if (isFromSearch) {
         console.log(`🔍 Renombrando desde búsqueda: ${sourceFilePath} → ${newFileName}`);
     } else {
-        updateFileStatus(currentManualFileId, 'Moviendo archivo...', 90);
+        updateFileStatus(currentManualFileId, currentMode === 'manual' ? 'Renombrando archivo...' : 'Moviendo archivo...', 90);
     }
 
-    const createSubfolder = (selectedType === 'pedidos');
-    const result = await window.electronAPI.moveFile(sourceFilePath, targetFolder, newFileName, createSubfolder);
+    let result;
+    if (currentMode === 'manual' && !isFromSearch && !isFromWatch) {
+        // Renombrar en la misma carpeta
+        result = await window.electronAPI.renameFile(sourceFilePath, newFileName);
+    } else {
+        // Mover a la carpeta destino
+        const createSubfolder = (selectedType === 'pedidos');
+        result = await window.electronAPI.moveFile(sourceFilePath, targetFolder, newFileName, createSubfolder);
+    }
 
     if (result.success) {
         if (isFromSearch) {
-            console.log(`✅ Archivo movido exitosamente desde búsqueda: ${result.newPath}`);
+            console.log(`✅ Archivo movido/renombrado exitosamente desde búsqueda: ${result.newPath}`);
 
             // Eliminar la entrada antigua del índice OCR
             if (ocrIndex[sourceFilePath]) {

@@ -229,14 +229,23 @@
                             <span>Carpeta Vigilada</span>
                         </div>
                         <div class="folder-config-item">
-                            <span class="folder-label">Carpeta:</span>
+                            <span class="folder-label">Carpeta Vigilada:</span>
                             <div class="folder-input-group">
                                 <input type="text" id="watch-folder" class="folder-input" readonly placeholder="Sin configurar">
                                 <button class="browse-btn-small folder-browse-btn" id="btn-select-watch-folder" disabled>📂</button>
                                 <button class="browse-btn-small folder-browse-btn" id="btn-clear-watch-folder" title="Eliminar carpeta vigilada" disabled>✕</button>
                             </div>
                         </div>
-                        <p class="input-hint" style="margin-top: 6px; font-size: 0.78rem;">PDFs nuevos aquí se procesan y renombran automáticamente.</p>
+
+                        <div class="folder-config-item" style="margin-top: 10px;">
+                            <span class="folder-label">Carpeta de Incidencias (Fallos):</span>
+                            <div class="folder-input-group">
+                                <input type="text" id="watch-error-folder" class="folder-input" readonly placeholder="Sin configurar">
+                                <button class="browse-btn-small folder-browse-btn" id="btn-select-watch-error-folder" disabled>📂</button>
+                                <button class="browse-btn-small folder-browse-btn" id="btn-clear-watch-error-folder" title="Eliminar carpeta de incidencias" disabled>✕</button>
+                            </div>
+                        </div>
+                        <p class="input-hint" style="margin-top: 6px; font-size: 0.78rem;">PDFs nuevos se procesan automáticamente. Si fallan, se mueven a la carpeta de incidencias.</p>
                     </div>
                 </div>
             </div>

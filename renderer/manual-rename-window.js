@@ -183,11 +183,11 @@ async function displayFileData(data) {
         autoDetectMessage.style.display = 'none';
     }
 
-    // Mostrar selector de tipo si es modo auto o viene desde búsqueda
+    // Mostrar selector de tipo si es modo auto, manual o viene desde búsqueda
     const docTypeSelector = document.getElementById('doc-type-selector');
     const docTypeSelect = document.getElementById('manual-doc-type');
 
-    if (currentMode === 'auto' || currentMode === 'search' || isFromSearch) {
+    if (currentMode === 'auto' || currentMode === 'manual' || currentMode === 'search' || isFromSearch) {
         docTypeSelector.style.display = 'block';
         docTypeSelect.value = detectedType || '';
     } else {
@@ -347,7 +347,7 @@ function updatePreviewFilename() {
     const codigo = document.getElementById('manual-codigo').value.trim();
     const previewSpan = document.getElementById('preview-filename');
 
-    const needsTypeSelection = currentFileData?.currentMode === 'auto' || currentFileData?.currentMode === 'search' || currentFileData?.isFromSearch;
+    const needsTypeSelection = currentFileData?.currentMode === 'auto' || currentFileData?.currentMode === 'manual' || currentFileData?.currentMode === 'search' || currentFileData?.isFromSearch;
     let selectedType = currentFileData?.currentMode;
     if (needsTypeSelection) {
         selectedType = document.getElementById('manual-doc-type').value;
@@ -432,7 +432,7 @@ function confirmRename() {
     const serie = document.getElementById('manual-serie').value.trim();
     const codigo = document.getElementById('manual-codigo').value.trim();
     const docTypeSelect = document.getElementById('manual-doc-type');
-    const needsTypeSelection = currentFileData?.currentMode === 'auto' || currentFileData?.currentMode === 'search' || currentFileData?.isFromSearch;
+    const needsTypeSelection = currentFileData?.currentMode === 'auto' || currentFileData?.currentMode === 'manual' || currentFileData?.currentMode === 'search' || currentFileData?.isFromSearch;
     const selectedType = needsTypeSelection ? docTypeSelect.value : currentFileData?.currentMode;
 
     // Limpiar errores previos
