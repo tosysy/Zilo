@@ -1,35 +1,56 @@
-# Zilo - Procesador Inteligente de PDFs
+# Zilo v1.0.0 - Procesador Inteligente de PDFs
 
-Zilo es una solución avanzada de escritorio para la gestión, clasificación y procesamiento de documentos PDF, diseñada para optimizar flujos de trabajo que requieren precisión y velocidad.
+Zilo es una aplicación de escritorio basada en Electron para la clasificación y procesamiento automatizado de documentos PDF. Utiliza OCR (Tesseract.js) para extraer texto de documentos, detecta automáticamente el tipo de documento, los renombra siguiendo convenciones estandarizadas y los organiza en carpetas apropiadas.
 
-## Funcionalidades Principales
+**Caso de uso principal**: Procesamiento de documentos comerciales españoles (albaranes, pedidos, DUAs, facturas, entradas) mediante la extracción de números de documento y su organización automática.
+
+## 🚀 Funcionalidades Principales
 
 ### 🔍 Procesamiento OCR Avanzado
-Zilo integra tecnología de Reconocimiento Óptico de Caracteres (OCR) para extraer texto de documentos escaneados.
+Zilo integra tecnología de Reconocimiento Óptico de Caracteres para extraer texto de documentos escaneados.
 - **Indexación Automática:** El contenido extraído se indexa para permitir búsquedas instantáneas de documentos.
-- **Configuración de Escaneo:** Permite definir cuántas páginas procesar por archivo para optimizar el rendimiento.
-- **Procesamiento Concurrente:** Capacidad de procesar múltiples archivos simultáneamente con límites configurables.
+- **Detección Automática:** Identifica el tipo de documento (albarán, pedido, factura, etc.) analizando su contenido.
+- **Procesamiento por Lotes:** Capacidad de procesar grandes volúmenes de archivos con límites de concurrencia configurables para no saturar el sistema.
 
 ### ✍️ Renombrado Inteligente y Manual
-- **Modo de Renombrado Manual:** Nueva interfaz dedicada para seleccionar y renombrar archivos manualmente con visor de PDF integrado.
-- **Renombrado por OCR:** Capacidad de identificar patrones de texto para sugerir nombres de archivos precisos (Series, Códigos, Tipos de Documento).
-- **Ventana de Renombrado Manual:** Interfaz dedicada con visor de PDF integrado que permite:
-  - Zoom dinámico y navegación fluida por el documento.
-  - Validación en tiempo real de formatos (Series y Códigos numéricos).
-  - Previsualización instantánea del nombre final del archivo.
-- **Vigilancia de Carpetas (Watch Mode):** Monitoreo en tiempo real de carpetas específicas; los archivos nuevos se detectan y procesan automáticamente.
+- **Renombrado Automático:** Extrae números de documento y formatea el nombre según el estándar: `S-NNNNNN TIPO.pdf` (ej. `1-13770 ALBARAN.pdf`).
+- **Ventana de Renombrado Manual:** Cuando la extracción falla, se abre una interfaz con visor de PDF integrado que permite:
+  - Validación en tiempo real de formatos.
+  - Previsualización instantánea del nombre final.
+  - Selección rápida del tipo de documento.
 
 ### 📂 Organización y Clasificación
-- **Gestión de Incidencias:** Sistema automático que mueve archivos no detectados o con errores a una carpeta de incidencias configurada, asegurando que ningún documento se pierda en el flujo de trabajo.
-- **Clasificación por Reglas:** Los documentos pueden moverse automáticamente a carpetas de destino basadas en su contenido o metadatos.
-- **Seguridad de Datos:** Sistema integrado de copias de seguridad para prevenir la pérdida de información durante procesos de movimiento o renombrado.
-- **Persistencia en SQLite:** Utiliza una base de datos robusta para el seguimiento de archivos procesados y configuración.
+- **Modos de Operación:** 6 modos distintos (Auto, Albaranes, Pedidos, DUAs, Facturas, Entradas).
+- **Subcarpetas Automáticas:** El modo Pedidos crea automáticamente subcarpetas basadas en el número de pedido.
+- **Gestión de Conflictos:** Resolución automática de nombres duplicados añadiendo sufijos numéricos.
+- **Soporte Multi-Disco:** Manejo robusto de movimiento de archivos entre diferentes unidades de disco.
 
 ### 🖥️ Interfaz y Experiencia de Usuario
-- **Modo Oscuro/Claro:** Interfaz personalizable que se adapta a las preferencias visuales del usuario.
-- **Búsqueda Multitérmino:** Motor de búsqueda potente que permite filtrar documentos por múltiples términos en cascada.
-- **Control de Estado:** Bloqueo de seguridad en carpetas críticas para evitar modificaciones accidentales.
+- **Modo Oscuro/Claro:** Interfaz moderna y personalizable.
+- **Búsqueda Multitérmino:** Motor de búsqueda potente que permite filtrar documentos por hasta 4 términos simultáneos.
+- **Sistema de Bloqueo:** Protección de carpetas de destino para evitar cambios accidentales.
+
+## 🛠️ Detalles Técnicos
+
+### Arquitectura
+- **Framework:** Electron (Node.js + Chromium).
+- **OCR:** Tesseract.js (Modelo de lenguaje en español).
+- **Renderizado PDF:** PDF.js.
+- **Persistencia:** LocalStorage para configuración e indexación JSON para búsquedas.
+
+### Comandos de Desarrollo
+```bash
+npm start              # Iniciar la aplicación
+npm run build          # Generar instalador para Windows (NSIS)
+```
+
+### Estructura del Proyecto
+- `main.js`: Proceso principal de Electron, lógica de sistema de archivos e IPC.
+- `renderer/`: Interfaz de usuario (HTML, CSS, JS).
+- `preload.js`: Puentes de seguridad entre el proceso principal y la interfaz.
+
+## 📦 Instalación
+Los instaladores y ejecutables están disponibles en la sección de [Releases](https://github.com/tosysy/Zilo/releases).
 
 ---
-
-*Nota: Los instaladores y ejecutables están disponibles en la sección de [Releases](https://github.com/tosysy/Zilo/releases).*
+© 2026 Procesador de PDFs - Desarrollado por Pablo Couse Pena

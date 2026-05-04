@@ -4,12 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Zilo v2.0** is an Electron-based desktop application for automated PDF document processing and classification. The application uses OCR (Tesseract.js) to extract text from PDF documents, automatically detects document types, renames files according to standardized naming conventions, and organizes them into appropriate folders.
+**Zilo v1.0** is an Electron-based desktop application for automated PDF document processing and classification. The application uses OCR (Tesseract.js) to extract text from PDF documents, automatically detects document types, renames files according to standardized naming conventions, and organizes them into appropriate folders.
 
 **Primary Use Case**: Processing Spanish business documents (albaranes/delivery notes, pedidos/orders, DUAs/customs documents, facturas/invoices, entradas/receipts) by extracting document numbers and automatically renaming/organizing them.
 
-**Version**: 2.0.0 (Optimized)
-**Last Updated**: October 19, 2025
+**Version**: 1.0.0
+**Last Updated**: May 4, 2026
 
 ## Commands
 
