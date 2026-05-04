@@ -87,7 +87,7 @@ function stopWatchFolder() {
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 900,
-    height: 600,
+    height: 660,
     resizable: false,
     maximizable: false,
     fullscreenable: false,
