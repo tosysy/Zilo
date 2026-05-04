@@ -465,8 +465,7 @@ See `PLAN_MEJORAS_ZILO.txt` for detailed roadmap including:
 
 ## Version History
 
-- **v2.0.0** (Oct 19, 2025): Major code optimization, removed duplicate files, improved maintainability
-- **v1.0.0** (Initial): First functional version with all core features
+- **v1.0.0** (May 4, 2026): Initial functional version with all core features and optimized architecture.
 
 ---
 
