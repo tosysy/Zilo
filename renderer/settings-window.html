@@ -3,130 +3,94 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Configuración</title>
+    <title>Configuración — Zilo</title>
     <link rel="stylesheet" href="styles.css">
     <style>
-        body {
-            margin: 0;
-            padding: 0;
-            overflow: hidden;
-        }
+        body { margin: 0; padding: 0; overflow: hidden; }
+
         .modal-content {
-            width: 100% !important;
-            max-width: none !important;
-            height: 100vh;
-            max-height: none !important;
-            border-radius: 0;
-            box-shadow: none;
+            width: 100% !important; max-width: none !important;
+            height: 100vh; max-height: none !important;
+            border-radius: 0; box-shadow: none;
         }
 
-        /* Estilos personalizados para configuración */
         .settings-section {
-            background: white;
-            border-radius: 12px;
-            padding: 20px;
-            box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
-            height: 100%;
+            background: white; border-radius: 12px; padding: 20px;
+            box-shadow: 0 2px 12px rgba(0,0,0,.08);
         }
-
         body.dark-mode .settings-section {
-            background: #2d2d2d;
-            box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
+            background: #2d2d2d; box-shadow: 0 2px 12px rgba(0,0,0,.3);
         }
 
         .settings-section-title {
-            font-size: 1.05rem;
-            font-weight: 600;
-            color: #2c3e50;
-            margin-bottom: 15px;
-            display: flex;
-            align-items: center;
-            gap: 10px;
+            font-size: 1.05rem; font-weight: 600; color: #2c3e50;
+            margin-bottom: 15px; display: flex; align-items: center; gap: 10px;
         }
+        body.dark-mode .settings-section-title { color: #e0e0e0; }
+        .settings-icon { font-size: 1.4rem; }
 
-        body.dark-mode .settings-section-title {
-            color: #e0e0e0;
+        .settings-field {
+            width: 100%; padding: 10px 12px; border: 2px solid #d7d7d7 !important;
+            border-radius: 8px; font-size: .95em; background: #fff !important;
+            color: #3b4245 !important; transition: border-color .2s, background .2s;
+            box-sizing: border-box;
         }
-
-        .settings-icon {
-            font-size: 1.4rem;
+        body.dark-mode .settings-field {
+            background: #1a1a1a !important; border-color: #555 !important; color: #f5f5f5 !important;
         }
 
         .folder-config-item {
-            background: #f8f9fa;
-            border: 1px solid #e0e0e0;
-            border-radius: 6px;
-            padding: 8px;
-            margin-bottom: 8px;
-            transition: all 0.2s ease;
+            background: #f8f9fa; border: 1px solid #e0e0e0; border-radius: 6px;
+            padding: 8px; margin-bottom: 8px; transition: all .2s;
         }
+        .folder-config-item:last-child { margin-bottom: 0; }
+        .folder-config-item:hover { border-color: #3b4245; box-shadow: 0 2px 8px rgba(0,0,0,.06); }
+        body.dark-mode .folder-config-item { background: #1a1a1a; border-color: #444; }
+        body.dark-mode .folder-config-item:hover { border-color: #7d8282; }
 
-        .folder-config-item:last-child {
+        .folder-label { font-weight: 600; color: #34495e; font-size: .95rem; }
+        body.dark-mode .folder-label { color: #b0b0b0; }
+
+        .input-group { margin-bottom: 0; }
+        .input-error { border-color: #dc2626 !important; box-shadow: 0 0 0 2px rgba(220,38,38,.2) !important; }
+
+        /* Atajo a tipos de documento */
+        .types-shortcut {
+            display: flex; align-items: center; gap: 14px;
+            background: linear-gradient(135deg, #f0f7ff, #e8f0fe);
+            border: 1.5px solid #c5d8f8; border-radius: 10px; padding: 14px 16px;
             margin-bottom: 0;
         }
-
-        .folder-config-item:hover {
-            border-color: #3b4245;
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+        body.dark-mode .types-shortcut {
+            background: linear-gradient(135deg, #1a2540, #1e2a4a);
+            border-color: #2d4a7a;
         }
-
-        body.dark-mode .folder-config-item {
-            background: #1a1a1a;
-            border-color: #444;
+        .types-shortcut .ts-icon { font-size: 2rem; }
+        .types-shortcut .ts-text h4 { font-size: .9rem; font-weight: 700; color: #1d4ed8; margin-bottom: 3px; }
+        body.dark-mode .types-shortcut .ts-text h4 { color: #93c5fd; }
+        .types-shortcut .ts-text p  { font-size: .78rem; color: #555; line-height: 1.5; }
+        body.dark-mode .types-shortcut .ts-text p { color: #aaa; }
+        .ts-btn {
+            margin-left: auto; flex-shrink: 0; padding: 8px 14px;
+            background: #1d4ed8; color: white; border: none; border-radius: 8px;
+            font-size: .82rem; font-weight: 600; cursor: pointer; transition: background .15s;
         }
-
-        body.dark-mode .folder-config-item:hover {
-            border-color: #7d8282;
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
-        }
-
-        .folder-label {
-            font-weight: 600;
-            color: #34495e;
-            font-size: 0.95rem;
-        }
-
-        body.dark-mode .folder-label {
-            color: #b0b0b0;
-        }
-
-        .input-group {
-            margin-bottom: 0;
-        }
-
-        /* Estilo unificado para los tres campos de la sección Procesamiento */
-        .settings-field {
-            width: 100%;
-            padding: 10px 12px;
-            border: 2px solid #d7d7d7 !important;
-            border-radius: 8px;
-            font-size: 0.95em;
-            background: #ffffff !important;
-            color: #3b4245 !important;
-            transition: border-color 0.2s, background 0.2s, color 0.2s;
-            box-sizing: border-box;
-        }
-
-        body.dark-mode .settings-field {
-            background: #1a1a1a !important;
-            border-color: #555 !important;
-            color: #f5f5f5 !important;
-        }
-
-        .input-error {
-            border-color: #dc2626 !important;
-            box-shadow: 0 0 0 2px rgba(220, 38, 38, 0.2) !important;
-        }
+        .ts-btn:hover { background: #1e40af; }
+        body.dark-mode .ts-btn { background: #2563eb; }
     </style>
 </head>
 <body class="window-body">
-    <div class="modal-content modal-settings" style="display: block; position: relative;">
+    <div class="modal-content modal-settings" style="display:block; position:relative;">
         <div class="modal-header">
             <h3>⚙️ Configuración</h3>
         </div>
-        <div class="modal-body" style="padding: 25px 25px 20px 25px;">
+
+        <div class="modal-body" style="padding: 25px;">
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 25px; align-items: start;">
-                <div class="settings-section" style="display: flex; flex-direction: column; gap: 20px;">
+
+                <!-- Columna izquierda: Procesamiento + OCR index -->
+                <div class="settings-section" style="display:flex; flex-direction:column; gap:20px;">
+
                     <div>
                         <div class="settings-section-title">
                             <span class="settings-icon">⚡</span>
@@ -135,11 +99,11 @@
 
                         <div class="input-group">
                             <label for="concurrent-limit">Límite de procesamiento simultáneo:</label>
-                            <input type="text" inputmode="numeric" pattern="[0-9]*" id="concurrent-limit" class="settings-field" min="1" max="100" placeholder="Ej: 50">
-                            <p class="input-hint" style="margin-bottom: 5px;">Define cuántos archivos se procesan a la vez. (Recomendado: 10-50)</p>
+                            <input type="text" inputmode="numeric" pattern="[0-9]*" id="concurrent-limit" class="settings-field" placeholder="Ej: 50">
+                            <p class="input-hint" style="margin-bottom:5px;">Define cuántos archivos se procesan a la vez. (Recomendado: 10-50)</p>
                         </div>
 
-                        <div class="input-group" style="margin-top: 15px;">
+                        <div class="input-group" style="margin-top:15px;">
                             <label for="max-pages">Páginas a procesar por PDF:</label>
                             <select id="max-pages" class="settings-field" style="cursor:pointer;">
                                 <option value="1">Solo página 1 — rápido</option>
@@ -148,7 +112,7 @@
                                 <option value="5">Hasta 5 páginas</option>
                                 <option value="0" selected>Todas las páginas (por defecto)</option>
                             </select>
-                            <p class="input-hint" style="margin-top: 6px;">Más páginas mejora la detección en documentos largos, pero aumenta el tiempo de procesamiento.</p>
+                            <p class="input-hint" style="margin-top:6px;">Más páginas mejora la detección, pero aumenta el tiempo de procesamiento.</p>
                         </div>
                     </div>
 
@@ -157,112 +121,68 @@
                             <span class="settings-icon">💾</span>
                             <span>Índice de Búsqueda OCR</span>
                         </div>
-
                         <div class="input-group">
                             <label for="ocr-index-path">Ubicación del archivo de índice:</label>
-                            <div style="display: flex; gap: 5px; align-items: center;">
-                                <input type="text" id="ocr-index-path" class="settings-field" readonly placeholder="Ubicación por defecto" style="flex: 1;">
+                            <div style="display:flex; gap:5px; align-items:center;">
+                                <input type="text" id="ocr-index-path" class="settings-field" readonly placeholder="Ubicación por defecto" style="flex:1;">
                                 <button class="browse-btn-small" id="btn-select-ocr-location">📂</button>
-                                <button class="browse-btn-small" id="btn-reset-ocr-location" title="Restaurar ubicación por defecto">↻</button>
+                                <button class="browse-btn-small" id="btn-reset-ocr-location" title="Restaurar por defecto">↻</button>
                             </div>
-                            <p class="input-hint" style="margin-top: 8px;">Archivo JSON donde se guarda el índice de textos extraídos de los PDFs para búsqueda.</p>
+                            <p class="input-hint" style="margin-top:8px;">Archivo JSON con el índice de textos extraídos de PDFs para búsqueda.</p>
                         </div>
+                    </div>
+
+                    <!-- Atajo a tipos de documento -->
+                    <div class="types-shortcut">
+                        <span class="ts-icon">🗂️</span>
+                        <div class="ts-text">
+                            <h4>Tipos de documento</h4>
+                            <p>Define qué tipos de documentos quieres renombrar y las carpetas destino de cada uno.</p>
+                        </div>
+                        <button class="ts-btn" id="btn-open-doc-types">Gestionar →</button>
                     </div>
                 </div>
 
-                <div class="settings-section" style="display: flex; flex-direction: column;">
-                    <div class="settings-section-title">
-                        <span class="settings-icon">📁</span>
-                        <span>Carpetas para Detección Automática</span>
-                        <button class="lock-btn" id="lock-folders" title="Bloquear/Desbloquear configuración" style="margin-left: auto;">
-                            🔒
-                        </button>
-                    </div>
-
-                    <div id="multi-folder-selector" style="margin: 0;">
-
-                        <div class="folder-config-item">
-                            <span class="folder-label">📋 Albaranes:</span>
-                            <div class="folder-input-group">
-                                <input type="text" id="folder-albaranes" class="folder-input" readonly placeholder="Sin configurar">
-                                <button class="browse-btn-small folder-browse-btn" data-folder-type="albaranes" disabled>📂</button>
-                            </div>
-                        </div>
-
-                        <div class="folder-config-item">
-                            <span class="folder-label">📦 Pedidos:</span>
-                            <div class="folder-input-group">
-                                <input type="text" id="folder-pedidos" class="folder-input" readonly placeholder="Sin configurar">
-                                <button class="browse-btn-small folder-browse-btn" data-folder-type="pedidos" disabled>📂</button>
-                            </div>
-                        </div>
-
-                        <div class="folder-config-item">
-                            <span class="folder-label">📄 DUAs:</span>
-                            <div class="folder-input-group">
-                                <input type="text" id="folder-duas" class="folder-input" readonly placeholder="Sin configurar">
-                                <button class="browse-btn-small folder-browse-btn" data-folder-type="duas" disabled>📂</button>
-                            </div>
-                        </div>
-
-                        <div class="folder-config-item">
-                            <span class="folder-label">🧾 Facturas:</span>
-                            <div class="folder-input-group">
-                                <input type="text" id="folder-facturas" class="folder-input" readonly placeholder="Sin configurar">
-                                <button class="browse-btn-small folder-browse-btn" data-folder-type="facturas" disabled>📂</button>
-                            </div>
-                        </div>
-
-                        <div class="folder-config-item">
-                            <span class="folder-label">📥 Entradas:</span>
-                            <div class="folder-input-group">
-                                <input type="text" id="folder-entradas" class="folder-input" readonly placeholder="Sin configurar">
-                                <button class="browse-btn-small folder-browse-btn" data-folder-type="entradas" disabled>📂</button>
-                            </div>
-                        </div>
-
-                    </div>
-
-                    <div style="margin-top: 16px;">
-                        <div class="settings-section-title" style="margin-bottom: 10px;">
+                <!-- Columna derecha: Carpeta Vigilada -->
+                <div class="settings-section" style="display:flex; flex-direction:column; gap:16px;">
+                    <div>
+                        <div class="settings-section-title">
                             <span class="settings-icon">👁️</span>
                             <span>Carpeta Vigilada</span>
                         </div>
+
                         <div class="folder-config-item">
-                            <span class="folder-label">Carpeta Vigilada:</span>
+                            <span class="folder-label">Carpeta a vigilar:</span>
                             <div class="folder-input-group">
                                 <input type="text" id="watch-folder" class="folder-input" readonly placeholder="Sin configurar">
-                                <button class="browse-btn-small folder-browse-btn" id="btn-select-watch-folder" disabled>📂</button>
-                                <button class="browse-btn-small folder-browse-btn" id="btn-clear-watch-folder" title="Eliminar carpeta vigilada" disabled>✕</button>
+                                <button class="browse-btn-small" id="btn-select-watch-folder">📂</button>
+                                <button class="browse-btn-small" id="btn-clear-watch-folder" title="Eliminar">✕</button>
                             </div>
                         </div>
 
-                        <div class="folder-config-item" style="margin-top: 10px;">
+                        <div class="folder-config-item">
                             <span class="folder-label">Carpeta de Incidencias (Fallos):</span>
                             <div class="folder-input-group">
                                 <input type="text" id="watch-error-folder" class="folder-input" readonly placeholder="Sin configurar">
-                                <button class="browse-btn-small folder-browse-btn" id="btn-select-watch-error-folder" disabled>📂</button>
-                                <button class="browse-btn-small folder-browse-btn" id="btn-clear-watch-error-folder" title="Eliminar carpeta de incidencias" disabled>✕</button>
+                                <button class="browse-btn-small" id="btn-select-watch-error-folder">📂</button>
+                                <button class="browse-btn-small" id="btn-clear-watch-error-folder" title="Eliminar">✕</button>
                             </div>
                         </div>
-                        <p class="input-hint" style="margin-top: 6px; font-size: 0.78rem;">PDFs nuevos se procesan automáticamente. Si fallan, se mueven a la carpeta de incidencias.</p>
+
+                        <p class="input-hint" style="margin-top:8px; font-size:.78rem;">
+                            Los PDFs nuevos que entren en la carpeta vigilada se procesarán automáticamente usando OCR Zonal.
+                            Si no se detecta el tipo, se mueven a la carpeta de incidencias.
+                        </p>
                     </div>
                 </div>
-            </div>
-        </div>
-        <div class="modal-footer" style="display: flex; align-items: center; padding: 15px 25px;">
-            <p id="error-message" style="display: none; color: #ef4444; margin: 0; flex: 1; font-size: 0.85rem; font-weight: 500; text-align: left;"></p>
-            <div style="display: flex; gap: 10px;">
-                <button class="btn btn-secondary" id="btn-cancel">Cancelar</button>
-                <button class="btn btn-primary" id="btn-save">Guardar Cambios</button>
-            </div>
-        </div>
-    </div>
 
-    <script src="settings-window.js"></script>
-</body>
-</html>
-utton>
+            </div>
+        </div>
+
+        <div class="modal-footer" style="display:flex; align-items:center; padding:15px 25px;">
+            <p id="error-message" style="display:none; color:#ef4444; margin:0; flex:1; font-size:.85rem; font-weight:500;"></p>
+            <div style="display:flex; gap:10px;">
+                <button class="btn btn-secondary" id="btn-cancel">Cancelar</button>
                 <button class="btn btn-primary" id="btn-save">Guardar Cambios</button>
             </div>
         </div>

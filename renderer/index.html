@@ -3,102 +3,132 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Procesador de PDFs</title>
+    <title>Zilo</title>
     <link rel="stylesheet" href="styles.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/4.1.1/tesseract.min.js"></script>
+    <style>
+        /* ── Pantalla de selección adaptativa ── */
+        .selection-top {
+            display: flex; gap: 16px; justify-content: center; margin-bottom: 24px;
+        }
+        .selection-top .selection-btn {
+            flex: 0 0 200px;
+        }
+        .user-types-section {
+            width: 100%; max-width: 780px; margin: 0 auto;
+        }
+        .user-types-label {
+            font-size: .78rem; font-weight: 700; text-transform: uppercase;
+            letter-spacing: .07em; color: #888; margin-bottom: 12px; text-align: center;
+        }
+        .user-types-grid {
+            display: flex; flex-wrap: wrap; gap: 10px; justify-content: center;
+        }
+        .user-type-btn {
+            display: flex; flex-direction: column; align-items: center; gap: 6px;
+            padding: 14px 20px; border-radius: 12px; cursor: pointer; border: 2px solid #e0e0e0;
+            background: white; min-width: 120px; transition: all .15s; font-family: inherit;
+        }
+        .user-type-btn:hover { border-color: #3b4245; box-shadow: 0 3px 10px rgba(0,0,0,.08); }
+        body.dark-mode .user-type-btn { background: #2d2d2d; border-color: #444; color: #e0e0e0; }
+        body.dark-mode .user-type-btn:hover { border-color: #7d8282; }
+        .user-type-btn .ubt-icon { font-size: 1.6rem; }
+        .user-type-btn .ubt-name { font-size: .82rem; font-weight: 700; }
+
+        .no-types-hint {
+            text-align: center; color: #aaa; font-size: .85rem;
+            padding: 16px; border: 2px dashed #ddd; border-radius: 10px;
+        }
+        body.dark-mode .no-types-hint { border-color: #444; }
+
+        .manage-types-btn {
+            display: flex; align-items: center; gap: 7px;
+            margin: 18px auto 0; padding: 9px 18px;
+            background: none; border: 2px solid #3b4245; border-radius: 20px;
+            font-size: .83rem; font-weight: 600; color: #3b4245; cursor: pointer;
+            transition: all .15s;
+        }
+        .manage-types-btn:hover { background: #3b4245; color: white; }
+        body.dark-mode .manage-types-btn { border-color: #7d8282; color: #ccc; }
+        body.dark-mode .manage-types-btn:hover { background: #7d8282; color: white; }
+
+        /* Badge de tipo en modo de procesamiento */
+        .current-type-badge {
+            display: inline-flex; align-items: center; gap: 6px;
+            background: #f0f2f5; border-radius: 20px; padding: 4px 12px;
+            font-size: .8rem; font-weight: 600; color: #3b4245; margin-top: 4px;
+        }
+        body.dark-mode .current-type-badge { background: #333; color: #ccc; }
+    </style>
 </head>
 <body>
     <div class="app-container">
         <div class="header">
             <div class="logo-section">
                 <div class="logo-placeholder">
-                    <img src="logo.png" alt="Logo Empresa" class="logo-light">
-                    <img src="logo-dark.png" alt="Logo Empresa" class="logo-dark">
+                    <img src="logo.png" alt="Logo" class="logo-light">
+                    <img src="logo-dark.png" alt="Logo" class="logo-dark">
                 </div>
                 <div class="title-section">
-                    <h1>Procesador de PDFs</h1>
-                    <p>Renombra automáticamente tus documentos</p>
+                    <h1>Zilo</h1>
+                    <p>Renombrado inteligente de documentos</p>
                 </div>
             </div>
             <div class="header-actions">
-                <button class="change-mode-btn-header" id="change-mode-header" style="display: none;">
-                    ← Cambiar tipo
+                <button class="change-mode-btn-header" id="change-mode-header" style="display:none">
+                    ← Cambiar modo
                 </button>
-                <button class="search-btn" id="btn-search" title="Buscar en documentos">
-                    🔍
-                </button>
-
-                <button class="theme-toggle" id="btn-theme-toggle">
-                    <span id="theme-icon">☀️</span>
-                </button>
+                <button class="search-btn" id="btn-search" title="Buscar documentos">🔍</button>
+                <button class="theme-toggle" id="btn-theme-toggle"><span id="theme-icon">☀️</span></button>
             </div>
         </div>
 
+        <!-- ── Pantalla de selección ── -->
         <div id="selection-screen" class="selection-screen">
-            <h2>¿Qué tipo de documento deseas procesar?</h2>
-            <div class="selection-buttons">
+            <h2>¿Cómo quieres procesar los documentos?</h2>
+
+            <!-- Modos principales -->
+            <div class="selection-top">
                 <button class="selection-btn" data-mode="auto">
                     <div class="btn-icon">🤖</div>
-                    <div class="btn-title">Detección Automática</div>
-                    <div class="btn-description">Identifica el tipo de documento automáticamente</div>
+                    <div class="btn-title">Automático</div>
+                    <div class="btn-description">Zilo detecta el tipo y renombra solo</div>
                 </button>
-
-                <button class="selection-btn" data-mode="albaranes">
-                    <div class="btn-icon">📋</div>
-                    <div class="btn-title">Albaranes de Venta</div>
-                    <div class="btn-description">Formato: 1 013770 → 1-13770 ALBARAN.pdf</div>
-                </button>
-
-                <button class="selection-btn" data-mode="pedidos">
-                    <div class="btn-icon">📦</div>
-                    <div class="btn-title">Pedidos de Clientes</div>
-                    <div class="btn-description">Detecta RESTO/RESTOS automáticamente</div>
-                </button>
-
-                <button class="selection-btn" data-mode="duas">
-                    <div class="btn-icon">📄</div>
-                    <div class="btn-title">DUAs</div>
-                    <div class="btn-description">Formato: 1 013770 → 1-13770 DUA.pdf</div>
-                </button>
-
-                <button class="selection-btn" data-mode="facturas">
-                    <div class="btn-icon">🧾</div>
-                    <div class="btn-title">Facturas</div>
-                    <div class="btn-description">Formato: 1 013770 → 1-13770 FACTURA.pdf</div>
-                </button>
-
-                <button class="selection-btn" data-mode="entradas">
-                    <div class="btn-icon">📥</div>
-                    <div class="btn-title">Entradas</div>
-                    <div class="btn-description">Formato: 1 013770 → 1-13770 ENTRADA.pdf</div>
-                </button>
-
                 <button class="selection-btn" data-mode="manual">
                     <div class="btn-icon">✍️</div>
-                    <div class="btn-title">Renombrado Manual</div>
-                    <div class="btn-description">Selecciona y renombra archivos manualmente</div>
+                    <div class="btn-title">Manual</div>
+                    <div class="btn-description">Tú eliges el tipo y confirmas el nombre</div>
                 </button>
+            </div>
+
+            <!-- Tipos definidos por el usuario -->
+            <div class="user-types-section">
+                <div class="user-types-label">O procesa un tipo concreto:</div>
+                <div class="user-types-grid" id="user-types-grid">
+                    <!-- generado dinámicamente -->
+                </div>
+                <button class="manage-types-btn" id="btn-manage-types">🗂️ Gestionar tipos de documento</button>
             </div>
         </div>
 
-        <div id="processing-screen" class="processing-screen" style="display: none;">
+        <!-- ── Pantalla de procesamiento ── -->
+        <div id="processing-screen" class="processing-screen" style="display:none;">
             <div class="processing-container">
                 <div class="left-panel">
                     <div class="mode-header">
-                        <div class="mode-icon" id="mode-icon">📋</div>
+                        <div class="mode-icon" id="mode-icon">🤖</div>
                         <div>
-                            <h2 id="mode-title">Albaranes de Venta</h2>
-                            <p id="mode-description" class="mode-desc">Formato: 1 013770 → 1-13770 ALBARAN.pdf</p>
+                            <h2 id="mode-title">Detección Automática</h2>
+                            <p id="mode-description" class="mode-desc">Zilo detecta el tipo y renombra solo</p>
+                            <div class="current-type-badge" id="current-type-badge" style="display:none"></div>
                         </div>
                     </div>
 
-                    <div class="folder-selector" id="single-folder-selector">
+                    <div class="folder-selector" id="single-folder-selector" style="display:none;">
                         <div class="folder-header">
                             <label>📁 Guardar en:</label>
-                            <button class="lock-btn" id="lock-single" title="Bloquear/Desbloquear configuración">
-                                🔓
-                            </button>
+                            <button class="lock-btn" id="lock-single" title="Bloquear/Desbloquear">🔓</button>
                         </div>
                         <div class="folder-input-group">
                             <input type="text" id="destination-folder" class="folder-input" readonly placeholder="Selecciona carpeta destino...">
@@ -124,12 +154,15 @@
             </div>
         </div>
 
-
         <div class="footer">
             <div class="copyright-container">
-                <p>© 2026 Procesador de PDFs</p>
+                <p>© 2026 Zilo</p>
             </div>
-            <button class="settings-btn" id="btn-settings" title="Configuración">⚙️</button>
+            <div style="display:flex;gap:8px;align-items:center">
+                <button class="settings-btn" id="btn-admin-panel" title="Panel de Administración" style="display:none">🏢</button>
+                <button class="settings-btn" id="btn-ocr-zonal" title="Motor OCR Zonal">🎯</button>
+                <button class="settings-btn" id="btn-settings" title="Configuración">⚙️</button>
+            </div>
         </div>
     </div>
 

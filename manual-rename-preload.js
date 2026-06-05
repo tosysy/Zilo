@@ -1,6 +1,5 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
-// Exponer API segura al renderer de la ventana de renombrado manual
 contextBridge.exposeInMainWorld('manualRenameAPI', {
     // Confirmar el renombrado con los datos ingresados
     confirmRename: (data) => ipcRenderer.send('manual-rename-confirmed', data),
@@ -15,5 +14,8 @@ contextBridge.exposeInMainWorld('manualRenameAPI', {
     onFileData: (callback) => ipcRenderer.on('file-data', (_event, data) => callback(data)),
 
     // Recibir cambios de tema
-    onThemeChanged: (callback) => ipcRenderer.on('theme-changed', (_event, theme) => callback(theme))
+    onThemeChanged: (callback) => ipcRenderer.on('theme-changed', (_event, theme) => callback(theme)),
+
+    // Leer PDF para previsualización
+    readPdfFile: (filePath) => ipcRenderer.invoke('read-pdf-file', filePath),
 });

@@ -25,6 +25,12 @@
       "search-preload.js",
       "settings-preload.js",
       "manual-rename-preload.js",
+      "license-preload.js",
+      "admin-panel-preload.js",
+      "ocr-zonal-preload.js",
+      "license-manager.js",
+      "ocr-zonal-engine.js",
+      "ml-engine.js",
       "renderer/**/*",
       "build/icon.png",
       "!node_modules/**/*"
@@ -41,5 +47,9 @@
       "installerIcon": "build/icon.ico",
       "uninstallerIcon": "build/icon.ico"
     }
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.10.0",
+    "node-machine-id": "^1.1.12"
   }
 }

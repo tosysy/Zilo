@@ -1,73 +1,181 @@
 /**
- * @file Script principal para la aplicación de renombrado y clasificación de PDFs.
- * @description Gestiona la interfaz, el procesamiento de archivos mediante OCR,
- * el renombrado automático y manual, y la búsqueda de documentos indexados.
- * @author Gemini (revisado y refactorizado)
- * @version 2.0.0
+ * @file app.js — Zilo (versión adaptativa)
+ * @description Sin tipos hardcodeados. El usuario define sus propios tipos de documento.
+ * El motor OCR Zonal aprende a reconocerlos automáticamente con el tiempo.
  */
 
-// =================================================================================
-// --- INICIALIZACIÓN Y VARIABLES GLOBALES ---
-// =================================================================================
-
-// Configuración de PDF.js para usar el worker desde un CDN
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
-// Estado de la aplicación
-let currentMode = '';
-let processedFiles = new Set();
-let destinationFolder = '';
-let destinationFolders = {}; // Para modo automático
-let fileCounter = 0;
-let concurrentLimit = 50; // Límite de procesamiento simultáneo por defecto
-let maxPagesToProcess = 0; // Páginas a procesar por PDF (0 = todas)
+// ── Estado global ─────────────────────────────────────────────────────────────
+let currentMode        = '';       // 'auto' | 'manual' | tipo-id numérico
+let currentDocType     = null;     // objeto tipo activo { id, name, icon, folder, ocr_template_ids[] }
+let userDocTypes       = [];       // tipos cargados de la BD
+let processedFiles     = new Set();
+let destinationFolder  = '';
+let fileCounter        = 0;
+let concurrentLimit    = 3;   // Valor conservador: Tesseract es pesado, 50 ficheros en paralelo crashea máquinas normales
+let maxPagesToProcess  = 0;
+let foldersLocked      = true;
+let lockTimeout        = null;
+let ocrIndex           = {};
 
-// Cola para renombrado manual
-let manualRenameQueue = [];
-let currentManualFile = null;
-let currentManualFileId = null;
+// Cola renombrado manual
+let manualRenameQueue    = [];
+let currentManualFile    = null;
+let currentManualFileId  = null;
 
-// Sistema de bloqueo de carpetas
-let foldersLocked = true;
-let lockTimeout = null;
-
-// Índice de búsqueda OCR
-let ocrIndex = {};
-
-// =================================================================================
-// --- EVENTOS DEL CICLO DE VIDA DE LA PÁGINA ---
-// =================================================================================
+// Caché de estadísticas ML (se invalida tras cada entrenamiento)
+let _mlStatsCache = null;
 
 /**
- * Se ejecuta cuando el contenido del DOM está completamente cargado.
- * Inicializa la aplicación.
+ * Devuelve las estadísticas ML, usando caché para no llamar a IPC en cada archivo.
  */
+async function _getMlStats() {
+    if (!_mlStatsCache) {
+        try { _mlStatsCache = await window.electronAPI.mlGetStats(); } catch (_) { _mlStatsCache = {}; }
+    }
+    return _mlStatsCache;
+}
+
+// Caché de patrones aprendidos por tipo (evita un IPC por archivo en lotes)
+const _patternCache = {};
+const _PATTERN_CACHE_TTL = 30_000; // 30 s
+
+/**
+ * Devuelve los patrones aprendidos para un tipo, con caché de 30 segundos.
+ * Se invalida al aprender un nuevo patrón (ver llamadas a invalidatePatternCache).
+ */
+async function _getCachedPatterns(typeName) {
+    const now = Date.now();
+    const cached = _patternCache[typeName];
+    if (cached && (now - cached.ts) < _PATTERN_CACHE_TTL) return cached.data;
+    try {
+        const data = await window.electronAPI.getLearnedPatterns(typeName) || [];
+        _patternCache[typeName] = { data, ts: now };
+        return data;
+    } catch (_) { return []; }
+}
+
+function _invalidatePatternCache(typeName) {
+    delete _patternCache[typeName];
+}
+
+/**
+ * Zilo es "experto" en un tipo cuando:
+ *  - Ha procesado ≥20 documentos de ese tipo (ML robusto), O
+ *  - Ha procesado ≥10 documentos Y tiene un patrón de renombrado
+ *    confirmado ≥3 veces (sabe clasificar Y sabe dónde está el número).
+ */
+async function _isExpertForType(typeName) {
+    const stats    = await _getMlStats();
+    const key      = Object.keys(stats?.classes || {}).find(k => k.toLowerCase() === typeName.toLowerCase());
+    const docCount = key ? (stats.classes[key].docCount || 0) : 0;
+
+    if (docCount >= 20) return true;
+
+    if (docCount >= 10) {
+        const patterns = await _getCachedPatterns(typeName);
+        if (patterns.some(p => p.confirmations >= 3)) return true;
+    }
+    return false;
+}
+
+// ── Búsqueda de texto en OCR ya extraído (sin re-OCR) ───────────────────────
+
+/**
+ * Busca `beforeKw` en el texto OCR ya disponible y devuelve lo que sigue.
+ * Opera completamente sobre texto normalizado (sin acentos, minúsculas, espacios simples)
+ * para evitar desajustes de offset entre el texto original y el normalizado.
+ *
+ * Si hay `afterKw`, extrae hasta él. Si no, usa heurística de parada:
+ * para cuando aparece la primera palabra larga de solo letras (≥4 chars)
+ * — típicamente una etiqueta como "fecha", "tipo", "cliente" — o a los 30 chars.
+ */
+function _searchInOcrText(ocrText, beforeKw, afterKw) {
+    if (!ocrText || !beforeKw) return '';
+
+    const norm = t => t.normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ').toLowerCase().trim();
+
+    const normOcr    = norm(ocrText);
+    const normBefore = norm(beforeKw);
+    const idx = normOcr.indexOf(normBefore);
+    if (idx === -1) return '';
+
+    const rest = normOcr.slice(idx + normBefore.length).replace(/^[\s:.]+/, '');
+
+    let extracted;
+    if (afterKw) {
+        const normAfter = norm(afterKw);
+        const endIdx    = rest.indexOf(normAfter);
+        // Si no encuentra el afterKw, tomar hasta 40 chars como fallback
+        extracted = endIdx !== -1 ? rest.slice(0, endIdx) : rest.slice(0, 40);
+    } else {
+        // Sin afterKw: tomar tokens hasta encontrar una "palabra etiqueta"
+        // (≥4 letras puras) o superar 30 chars.
+        // Ej: "1 013770 fecha 05/01" → para en "fecha" → "1 013770"
+        const tokens = rest.split(/\s+/);
+        const parts  = [];
+        for (const tok of tokens) {
+            if (parts.length > 0 && /^[a-z]{4,}$/.test(tok)) break;
+            if (parts.join(' ').length >= 30) break;
+            parts.push(tok);
+        }
+        extracted = parts.join(' ');
+    }
+
+    return extracted.replace(/\s+/g, ' ').trim().slice(0, 60);
+}
+
+/**
+ * Aplica los patrones aprendidos de ejemplos manuales para extraer
+ * el texto de renombrado directamente del texto OCR ya disponible.
+ * Retorna el primer resultado válido (los patrones vienen ordenados
+ * por número de confirmaciones descendente).
+ */
+async function _extractByLearnedPattern(ocrText, typeName) {
+    if (!ocrText || !typeName) return '';
+    const patterns = await _getCachedPatterns(typeName);
+    if (!patterns.length) return '';
+    for (const p of patterns) {
+        const result = _searchInOcrText(ocrText, p.before_kw, p.after_kw);
+        if (result && result.length > 1) {
+            console.log(`[Pattern] "${typeName}": "${p.before_kw}" → "${result}" (×${p.confirmations})`);
+            return result;
+        }
+    }
+    return '';
+}
+
+// =================================================================================
+// INICIALIZACIÓN
+// =================================================================================
+
 window.addEventListener('DOMContentLoaded', () => {
-    // Cargar la configuración guardada por el usuario
     loadInitialSettings();
-
-    // Configurar los listeners de eventos principales
     setupEventListeners();
-
-    // Inicializar el estado visual de la UI
     updateLockState();
     loadOCRIndex();
-
-    // Configurar listeners para eventos de la ventana de renombrado manual
+    loadUserDocTypes();
     setupManualRenameListeners();
 
-    // Listener para archivos detectados por vigilancia de carpeta
     window.electronAPI.onWatchedFileDetected(async (fileData) => {
-        console.log('👁️ Archivo vigilado detectado:', fileData.name);
+        console.log('👁️ Archivo vigilado:', fileData.name);
         await processWatchedFile(fileData);
     });
+
+    // Recargar tipos cuando el usuario cierra la ventana de gestión
+    window.electronAPI.onDocTypesUpdated(() => loadUserDocTypes());
+
+    // Mostrar botón admin solo si admin
+    (async () => {
+        try {
+            const s = await window.electronAPI.getLicenseStatus();
+            if (s?.role === 'admin') document.getElementById('btn-admin-panel').style.display = 'inline-flex';
+        } catch (e) {}
+    })();
 });
 
-/**
- * Carga la configuración inicial desde localStorage.
- */
 function loadInitialSettings() {
-    // Cargar tema (claro/oscuro)
     const savedTheme = localStorage.getItem('theme');
     if (savedTheme === 'dark') {
         document.body.classList.add('dark-mode');
@@ -75,1009 +183,1126 @@ function loadInitialSettings() {
     } else {
         document.getElementById('theme-icon').textContent = '☀️';
     }
-
-    // Cargar límite de procesamiento concurrente
     const savedLimit = localStorage.getItem('concurrentLimit');
-    if (savedLimit) {
-        concurrentLimit = parseInt(savedLimit, 10);
-        console.log(`⚙️ Límite de procesamiento cargado: ${concurrentLimit}`);
-    }
+    if (savedLimit) concurrentLimit = parseInt(savedLimit, 10);
 
-    // Cargar páginas máximas a procesar por PDF
     const savedPages = localStorage.getItem('max-pages-ocr');
-    if (savedPages !== null) {
-        maxPagesToProcess = parseInt(savedPages, 10);
-        console.log(`📄 Páginas OCR por PDF: ${maxPagesToProcess === 0 ? 'todas' : maxPagesToProcess}`);
-    }
-
-    // Limpiar rutas corruptas del localStorage
-    cleanCorruptedPaths();
+    if (savedPages !== null) maxPagesToProcess = parseInt(savedPages, 10);
 }
 
-/**
- * Limpia rutas corruptas que no empiezan con una letra de unidad (C:\, D:\, etc.)
- */
-function cleanCorruptedPaths() {
-    const types = ['albaranes', 'pedidos', 'duas', 'facturas', 'entradas'];
-    let cleaned = false;
-
-    types.forEach(type => {
-        const folder = localStorage.getItem(`auto-folder-${type}`);
-        if (folder && !/^[A-Z]:\\/.test(folder)) {
-            console.warn(`🧹 Limpiando ruta corrupta para ${type}: ${folder}`);
-            localStorage.removeItem(`auto-folder-${type}`);
-            cleaned = true;
-        }
-    });
-
-    if (cleaned) {
-        console.log('✅ Rutas corruptas limpiadas. Por favor, reconfigura las carpetas en el modal de Configuración.');
-    }
-}
-
-/**
- * Configura todos los event listeners iniciales de la aplicación.
- */
 function setupEventListeners() {
-    // FIX: Se configuran una sola vez para evitar duplicados al cambiar de modo.
     setupDragAndDrop();
     setupFileInput();
 
-    // Event listeners para botones de navegación
     document.getElementById('change-mode-header').addEventListener('click', changeMode);
     document.getElementById('btn-search').addEventListener('click', showSearchModal);
     document.getElementById('btn-theme-toggle').addEventListener('click', toggleTheme);
     document.getElementById('btn-settings').addEventListener('click', showSettingsModal);
+    document.getElementById('btn-admin-panel').addEventListener('click', () => window.electronAPI.openAdminPanel());
+    document.getElementById('btn-ocr-zonal').addEventListener('click', () => window.electronAPI.openOcrZonalWindow());
+    document.getElementById('btn-manage-types').addEventListener('click', () => window.electronAPI.openDocTypesWindow());
 
-    // Event listeners para botones de selección de modo
-    const modeButtons = document.querySelectorAll('.selection-btn');
-    modeButtons.forEach(button => {
-        button.addEventListener('click', (e) => {
+    // Modos hardcodeados (auto / manual)
+    document.querySelectorAll('.selection-btn').forEach(btn => {
+        btn.addEventListener('click', e => {
             const mode = e.currentTarget.getAttribute('data-mode');
-            if (mode) {
-                selectMode(mode);
-            }
+            if (mode) selectMode(mode, null);
         });
     });
 
-    // Event listeners para botones de carpeta
     document.getElementById('lock-single').addEventListener('click', () => toggleLock('single'));
     document.getElementById('browse-single').addEventListener('click', selectDestinationFolder);
-
-    // Event listener para el área de carga de archivos
     document.getElementById('upload-area').addEventListener('click', () => {
         document.getElementById('file-input').click();
     });
 }
 
 /**
- * Configura los listeners para eventos de la ventana de renombrado manual
+ * Devuelve el array de IDs de plantillas OCR vinculadas a un tipo.
+ * Soporta el nuevo campo ocr_template_ids (array JSON) y el antiguo ocr_template_id (string).
  */
-function setupManualRenameListeners() {
-    // Listener para cuando se confirma el renombrado
-    window.electronAPI.onManualRenameConfirmed(async (data) => {
-        console.log('✅ Renombrado confirmado desde ventana:', data);
-        await handleManualRenameConfirmed(data);
-    });
+function _getTypeTemplateIds(type) {
+    if (Array.isArray(type.ocr_template_ids) && type.ocr_template_ids.length) {
+        return type.ocr_template_ids;
+    }
+    if (type.ocr_template_id) return [type.ocr_template_id];
+    return [];
+}
 
-    // Listener para cuando se omite el archivo
-    window.electronAPI.onManualRenameSkipped(() => {
-        console.log('↪️ Archivo omitido desde ventana');
-        handleManualRenameSkipped();
+// =================================================================================
+// TIPOS DE DOCUMENTO — carga dinámica
+// =================================================================================
+
+async function loadUserDocTypes() {
+    try {
+        userDocTypes = await window.electronAPI.getDocTypes();
+        renderUserTypeButtons();
+    } catch (e) {
+        console.error('Error cargando tipos:', e);
+    }
+}
+
+function renderUserTypeButtons() {
+    const grid = document.getElementById('user-types-grid');
+    if (!userDocTypes.length) {
+        grid.innerHTML = '<div class="no-types-hint">Aún no has definido tipos de documento.<br>Pulsa "Gestionar tipos" para crear el primero.</div>';
+        return;
+    }
+    grid.innerHTML = userDocTypes.map(t => `
+        <button class="user-type-btn" data-type-id="${t.id}">
+            <span class="ubt-icon">${t.icon}</span>
+            <span class="ubt-name">${t.name}</span>
+        </button>
+    `).join('');
+
+    grid.querySelectorAll('.user-type-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const id   = parseInt(btn.getAttribute('data-type-id'), 10);
+            const type = userDocTypes.find(t => t.id === id);
+            if (type) selectMode('type', type);
+        });
     });
 }
 
-
 // =================================================================================
-// --- GESTIÓN DE MODOS Y SELECCIÓN DE CARPETAS ---
+// GESTIÓN DE MODOS
 // =================================================================================
 
-/**
- * Cambia el modo de operación de la aplicación (auto, albaranes, etc.).
- * @param {string} mode - El modo a seleccionar.
- */
-function selectMode(mode) {
-    currentMode = mode;
-    
-    document.getElementById('selection-screen').style.display = 'none';
-    document.getElementById('processing-screen').style.display = 'flex';
+function selectMode(mode, docType = null) {
+    currentMode    = mode;
+    currentDocType = docType;
+
+    document.getElementById('selection-screen').style.display   = 'none';
+    document.getElementById('processing-screen').style.display  = 'flex';
     document.getElementById('change-mode-header').style.display = 'block';
-    
-    const modeConfig = {
-        auto: { icon: '🤖', title: 'Detección Automática', description: 'Detecta automáticamente el tipo de documento' },
-        albaranes: { icon: '📋', title: 'Albaranes de Venta', description: 'Formato: 1 013770 → 1-13770 ALBARAN.pdf' },
-        pedidos: { icon: '📦', title: 'Pedidos de Clientes', description: 'Detecta RESTO/RESTOS automáticamente' },
-        duas: { icon: '📄', title: 'DUAs', description: 'Formato: 1/013770 → 1-13770 DUA.pdf' },
-        facturas: { icon: '🧾', title: 'Facturas', description: 'Formato: 4/041258 → 4-41258 FACTURA.pdf' },
-        entradas: { icon: '📥', title: 'Entradas', description: 'Formato: 1/013770 → 1-13770 ENTRADA.pdf' },
-        manual: { icon: '✍️', title: 'Renombrado Manual', description: 'Selecciona y renombra archivos manualmente' }
-    };
-    
-    const config = modeConfig[mode];
-    document.getElementById('mode-icon').textContent = config.icon;
-    document.getElementById('mode-title').textContent = config.title;
-    document.getElementById('mode-description').textContent = config.description;
-    
-    if (mode === 'auto' || mode === 'manual') {
-        // En modo automático o manual, no mostramos selector de carpetas en pantalla principal
+
+    const badge = document.getElementById('current-type-badge');
+
+    if (mode === 'auto') {
+        document.getElementById('mode-icon').textContent        = '🤖';
+        document.getElementById('mode-title').textContent       = 'Detección Automática';
+        document.getElementById('mode-description').textContent = 'Zilo detecta el tipo y renombra solo usando OCR Zonal';
         document.getElementById('single-folder-selector').style.display = 'none';
+        badge.style.display = 'none';
 
-        if (mode === 'auto') {
-            // Cargar las carpetas desde localStorage para modo auto
-            const types = ['albaranes', 'pedidos', 'duas', 'facturas', 'entradas'];
-            types.forEach(type => {
-                const savedFolder = localStorage.getItem(`auto-folder-${type}`);
-                if (savedFolder) {
-                    destinationFolders[type] = savedFolder;
-                }
-            });
-            console.log('🗂️ Carpetas cargadas para modo AUTO:', destinationFolders);
-        }
-    } else {
-        // En modos específicos, mostrar selector de carpeta único
-        document.getElementById('single-folder-selector').style.display = 'block';
+    } else if (mode === 'manual') {
+        document.getElementById('mode-icon').textContent        = '✍️';
+        document.getElementById('mode-title').textContent       = 'Renombrado Manual';
+        document.getElementById('mode-description').textContent = 'Tú seleccionas el tipo y confirmas el nombre del archivo';
+        document.getElementById('single-folder-selector').style.display = 'none';
+        badge.style.display = 'none';
 
-        const savedFolder = localStorage.getItem(`${mode}-folder`);
-        if (savedFolder) {
-            destinationFolder = savedFolder;
-            document.getElementById('destination-folder').value = savedFolder;
+    } else if (mode === 'type' && docType) {
+        document.getElementById('mode-icon').textContent        = docType.icon;
+        document.getElementById('mode-title').textContent       = docType.name;
+        document.getElementById('mode-description').textContent = `Renombrado directo como "${docType.name}"`;
+        badge.textContent   = docType.folder ? `📁 ${docType.folder}` : '📁 Se pedirá destino al procesar';
+        badge.style.display = 'inline-flex';
+
+        if (docType.folder) {
+            destinationFolder = docType.folder;
+            document.getElementById('destination-folder').value = docType.folder;
+            document.getElementById('single-folder-selector').style.display = 'none';
+        } else {
+            document.getElementById('single-folder-selector').style.display = 'block';
         }
     }
-    
+
     updateLockState();
 }
 
-/**
- * Vuelve a la pantalla de selección de modo.
- */
 function changeMode() {
-    document.getElementById('selection-screen').style.display = 'flex';
-    document.getElementById('processing-screen').style.display = 'none';
+    document.getElementById('selection-screen').style.display   = 'flex';
+    document.getElementById('processing-screen').style.display  = 'none';
     document.getElementById('change-mode-header').style.display = 'none';
-    
-    // Limpiar estado
     document.getElementById('file-list').innerHTML = '';
     processedFiles.clear();
     fileCounter = 0;
     updateFileCounter();
+    currentMode    = '';
+    currentDocType = null;
+    // Recargar tipos por si cambiaron
+    loadUserDocTypes();
 }
 
 // =================================================================================
-// --- MANEJO DE ARCHIVOS (DRAG & DROP, INPUT) ---
+// DRAG & DROP / INPUT
 // =================================================================================
 
 function setupDragAndDrop() {
-    const uploadArea = document.getElementById('upload-area');
-
-    uploadArea.addEventListener('dragover', (e) => {
+    const ua = document.getElementById('upload-area');
+    ua.addEventListener('dragover', e => { e.preventDefault(); ua.classList.add('dragover'); });
+    ua.addEventListener('dragleave', () => ua.classList.remove('dragover'));
+    ua.addEventListener('drop', e => {
         e.preventDefault();
-        uploadArea.classList.add('dragover');
-    });
-
-    uploadArea.addEventListener('dragleave', () => uploadArea.classList.remove('dragover'));
-
-    uploadArea.addEventListener('drop', (e) => {
-        e.preventDefault();
-        uploadArea.classList.remove('dragover');
-
-        // En Electron, dataTransfer.files contiene la propiedad .path
+        ua.classList.remove('dragover');
         const files = Array.from(e.dataTransfer.files)
             .filter(f => f.name.toLowerCase().endsWith('.pdf'))
-            .map(f => ({
-                path: f.path,  // En Electron drag & drop, .path está disponible
-                name: f.name
-            }));
-
-        if (files.length > 0) handleFiles(files);
+            .map(f => ({ path: f.path, name: f.name }));
+        if (files.length) handleFiles(files);
     });
 }
 
 async function setupFileInput() {
-    // Reemplazar el comportamiento del clic en el área de upload
-    const uploadArea = document.getElementById('upload-area');
+    const ua        = document.getElementById('upload-area');
     const fileInput = document.getElementById('file-input');
-
-    // Cancelar el onclick original que viene del HTML
-    uploadArea.onclick = null;
-
-    uploadArea.addEventListener('click', async (e) => {
+    ua.onclick      = null;
+    ua.addEventListener('click', async e => {
         e.preventDefault();
         e.stopPropagation();
-
-        // Usar el diálogo nativo de Electron
         const result = await window.electronAPI.selectFiles();
-
-        if (result.success && result.files && result.files.length > 0) {
-            // Crear objetos con path para cada archivo seleccionado
-            const files = result.files.map(filePath => ({
-                path: filePath,
-                name: filePath.split('\\').pop().split('/').pop()
-            }));
-
+        if (result.success && result.files?.length) {
+            const files = result.files.map(fp => ({ path: fp, name: fp.split('\\').pop().split('/').pop() }));
             handleFiles(files);
         }
     });
-
-    // Ocultar el input file original
-    if (fileInput) {
-        fileInput.style.display = 'none';
-        fileInput.remove();
-    }
+    if (fileInput) fileInput.remove();
 }
 
-/**
- * Valida carpetas y procesa los archivos en lotes.
- * @param {File[]} files - Array de archivos a procesar.
- */
+// =================================================================================
+// PROCESAMIENTO DE ARCHIVOS
+// =================================================================================
+
 async function handleFiles(files) {
-    if (!validateDestinationFolders()) return;
+    if (!validateDestination()) return;
 
-    // Verificar que los archivos tienen la propiedad .path
-    console.log('🔍 Verificando archivos recibidos:', files.length);
-    files.forEach((file, i) => {
-        console.log(`  Archivo ${i + 1}: ${file.name}`);
-        console.log(`    - Tiene .path: ${file.path !== undefined}`);
-        console.log(`    - Valor de .path: ${file.path}`);
-    });
+    const list     = document.getElementById('file-list');
+    const newFiles = files.filter(f => !processedFiles.has(f.path));
+    if (!newFiles.length) return;
 
-    const listElement = document.getElementById('file-list');
-    const newFiles = files.filter(file => !processedFiles.has(file.path));
-
-    if (newFiles.length === 0) return;
-
-    console.log(`🌀 Procesando ${newFiles.length} archivos en lotes de ${concurrentLimit}`);
-
-    // Añadir todos los elementos a la UI de una vez para que el usuario los vea
-    newFiles.forEach(file => {
+    newFiles.forEach(f => {
         const fileId = `file-${Date.now()}-${Math.random()}`;
-        file.fileId = fileId; // Adjuntar el ID al objeto file
-        const fileItem = createFileItem(file, fileId);
-        listElement.insertBefore(fileItem, listElement.firstChild);
+        f.fileId = fileId;
+        list.insertBefore(createFileItem(f, fileId), list.firstChild);
     });
-    
-    // Procesar los archivos en lotes (chunks)
+
     for (let i = 0; i < newFiles.length; i += concurrentLimit) {
         const chunk = newFiles.slice(i, i + concurrentLimit);
-        console.log(`📦 Procesando lote ${Math.floor(i / concurrentLimit) + 1} con ${chunk.length} archivos.`);
-        
-        const promises = chunk.map(file => processFile(file, file.fileId));
-        await Promise.all(promises);
-    }
-    
-    console.log('✅ Todos los lotes han sido procesados.');
-}
-
-/**
- * Procesa un archivo detectado por la vigilancia de carpeta, usando siempre modo auto.
- */
-async function processWatchedFile(fileData) {
-    const file = { path: fileData.path, name: fileData.name };
-    console.log(`[WATCH] Iniciando procesamiento: "${file.name}" (${file.path})`);
-
-    // Cargar carpetas destino desde localStorage
-    const types = ['albaranes', 'pedidos', 'duas', 'facturas', 'entradas'];
-    types.forEach(type => {
-        const folder = localStorage.getItem(`auto-folder-${type}`);
-        if (folder) destinationFolders[type] = folder;
-    });
-    console.log('[WATCH] Carpetas destino cargadas:', destinationFolders);
-
-    const missingAll = types.every(t => !destinationFolders[t]);
-    if (missingAll) {
-        console.error('[WATCH] ❌ No hay carpetas destino configuradas, ignorando:', file.name);
-        return;
-    }
-
-    // Crear elemento en la lista de archivos
-    const fileId = `file-${Date.now()}-${Math.random()}`;
-    file.fileId = fileId;
-    const listElement = document.getElementById('file-list');
-    const fileItem = createFileItem(file, fileId);
-    listElement.insertBefore(fileItem, listElement.firstChild);
-    processedFiles.add(file.path);
-
-    try {
-        console.log('[WATCH] Leyendo PDF...');
-        updateFileStatus(fileId, 'Extrayendo texto...', 30);
-        const text = await extractTextFromPDF(file);
-        console.log(`[WATCH] Texto extraído (${text.length} chars):`, text.substring(0, 300));
-
-        updateFileStatus(fileId, 'Analizando contenido...', 60);
-        const detectedMode = detectDocumentType(text);
-        console.log('[WATCH] Tipo detectado:', detectedMode || 'ninguno');
-
-        if (!detectedMode) {
-            console.warn('[WATCH] ⚠️ No se detectó tipo, moviendo a carpeta de incidencias');
-            const errorFolder = localStorage.getItem('watch-error-folder');
-            if (errorFolder) {
-                updateFileStatus(fileId, '⚠️ Tipo no detectado, moviendo a incidencias...', 80);
-                await window.electronAPI.moveFile(file.path, errorFolder, file.name, false);
-                updateFileStatus(fileId, '⚠️ Movido a incidencias (Tipo no detectado)', 100, 'skipped');
-            } else {
-                console.error('[WATCH] ❌ No hay carpeta de incidencias configurada');
-                updateFileStatus(fileId, '❌ Error: Sin carpeta de incidencias', 100, 'error');
-            }
-            return;
-        }
-
-        const orderNumber = extractOrderNumber(text, detectedMode);
-        console.log('[WATCH] Número de orden extraído:', orderNumber || 'no encontrado');
-
-        if (orderNumber) {
-            const newFileName = generateNewFilename(orderNumber, detectedMode, text);
-            const targetFolder = destinationFolders[detectedMode];
-            console.log(`[WATCH] Renombrando a "${newFileName}", destino: "${targetFolder}"`);
-
-            if (!targetFolder) {
-                console.error(`[WATCH] ❌ Sin carpeta configurada para tipo "${detectedMode}"`);
-                updateFileStatus(fileId, `❌ Sin carpeta configurada para ${detectedMode}`, 100, 'error');
-                return;
-            }
-
-            updateFileStatus(fileId, 'Moviendo archivo...', 80);
-            const result = await window.electronAPI.moveFile(
-                file.path, targetFolder, newFileName, detectedMode === 'pedidos'
-            );
-            console.log('[WATCH] Resultado moveFile:', result);
-
-            if (result.success) {
-                updateFileStatus(fileId, `✅ Movido: ${newFileName}`, 100, 'success');
-                fileCounter++;
-                updateFileCounter();
-                await saveToOCRIndex(result.newPath, newFileName, text, detectedMode);
-                console.log('[WATCH] ✅ Procesamiento completado:', newFileName);
-            } else {
-                throw new Error(result.error);
-            }
-        } else {
-            console.warn('[WATCH] ⚠️ Número no encontrado, moviendo a carpeta de incidencias');
-            const errorFolder = localStorage.getItem('watch-error-folder');
-            if (errorFolder) {
-                updateFileStatus(fileId, '⚠️ Número no encontrado, moviendo a incidencias...', 80);
-                await window.electronAPI.moveFile(file.path, errorFolder, file.name, false);
-                updateFileStatus(fileId, '⚠️ Movido a incidencias (Número no encontrado)', 100, 'skipped');
-            } else {
-                console.error('[WATCH] ❌ No hay carpeta de incidencias configurada');
-                updateFileStatus(fileId, '❌ Error: Sin carpeta de incidencias', 100, 'error');
-            }
-        }
-    } catch (error) {
-        console.error(`[WATCH] ❌ Error procesando "${file.name}":`, error);
-        updateFileStatus(fileId, `❌ Error: ${error.message}`, 100, 'error');
+        await Promise.allSettled(chunk.map(f => processFile(f, f.fileId)));
     }
 }
 
-/**
- * Valida si las carpetas de destino están configuradas.
- * @returns {boolean} - True si las carpetas son válidas, false en caso contrario.
- */
-function validateDestinationFolders() {
+function validateDestination() {
     if (currentMode === 'manual') return true;
-
     if (currentMode === 'auto') {
-        const types = ['albaranes', 'pedidos', 'duas', 'facturas', 'entradas'];
-        const missingFolders = types.filter(type => !destinationFolders[type]);
-
-        if (missingFolders.length > 0) {
-            const names = { albaranes: 'Albaranes', pedidos: 'Pedidos', duas: 'DUAs', facturas: 'Facturas', entradas: 'Entradas' };
-            const folderList = missingFolders.map(t => `  • ${names[t]}`).join('\n');
-            alert(`⚙️ Configuración incompleta\n\nPara usar el modo de Detección Automática, debes configurar las carpetas destino en el modal de Configuración (botón ⚙️).\n\nCarpetas faltantes:\n${folderList}`);
+        const hasAnyType = userDocTypes.length > 0;
+        if (!hasAnyType) {
+            alert('⚙️ Primero define al menos un tipo de documento.\n\nPulsa "Gestionar tipos de documento" para crear tipos y enseñarle a Zilo.');
             return false;
         }
-    } else {
-        if (!destinationFolder) {
-            alert('Por favor, selecciona una carpeta destino antes de procesar archivos.');
+        const hasTemplates = userDocTypes.some(t => _getTypeTemplateIds(t).length > 0);
+        if (!hasTemplates) {
+            alert('⚙️ Ningún tipo tiene plantilla OCR vinculada.\n\nAbre el Motor OCR Zonal 🎯 para crear plantillas y vincúlalas a tus tipos de documento.');
             return false;
         }
+        return true;
+    }
+    if (currentMode === 'type') {
+        if (!destinationFolder && !currentDocType?.folder) {
+            alert('Selecciona una carpeta destino antes de procesar.');
+            return false;
+        }
+        return true;
     }
     return true;
 }
 
-
-// =================================================================================
-// --- LÓGICA DE PROCESAMIENTO DE PDF (OCR Y EXTRACCIÓN DE DATOS) ---
-// =================================================================================
-
 /**
- * Procesa un único archivo PDF.
- * @param {File} file - El archivo a procesar.
- * @param {string} fileId - El ID del elemento DOM asociado.
+ * Procesa un archivo individual.
  */
 async function processFile(file, fileId) {
-    const fileItem = document.getElementById(fileId);
-    const statusElement = fileItem.querySelector('.file-status');
-    const progressFill = fileItem.querySelector('.progress-fill');
-
     try {
         updateFileStatus(fileId, 'Extrayendo texto...', 30);
         const text = await extractTextFromPDF(file);
-        
+
         updateFileStatus(fileId, 'Analizando contenido...', 60);
-        
+
+        // ── Modo manual: siempre a la cola de renombrado ──────────────────────
         if (currentMode === 'manual') {
-            console.log(`✍️ Modo manual activo para ${file.name}, enviando a renombrado manual.`);
             queueForManualRename(file, fileId, null, text);
             return;
         }
 
-        let detectedMode = currentMode === 'auto' ? detectDocumentType(text) : currentMode;
-        
-        if (currentMode === 'auto' && !detectedMode) {
-            console.log(`🟡 No se detectó tipo para ${file.name}, enviando a renombrado manual.`);
-            queueForManualRename(file, fileId, null, text);
-            return;
-        }
-
-        const orderNumber = extractOrderNumber(text, detectedMode);
-        
-        if (orderNumber) {
-            const newFileName = generateNewFilename(orderNumber, detectedMode, text);
-            let targetFolder = (currentMode === 'auto') ? destinationFolders[detectedMode] : destinationFolder;
-            
-            if (!targetFolder) throw new Error(`No hay carpeta configurada para el tipo: ${detectedMode}`);
-            
-            updateFileStatus(fileId, 'Moviendo archivo...', 80);
-            const createSubfolder = (detectedMode === 'pedidos');
-            const result = await window.electronAPI.moveFile(file.path, targetFolder, newFileName, createSubfolder);
-
-            if (result.success) {
-                updateFileStatus(fileId, `✅ Movido: ${newFileName}`, 100, 'success');
-                processedFiles.add(file.path);
-                fileCounter++;
-                updateFileCounter();
-                await saveToOCRIndex(result.newPath, newFileName, text, detectedMode);
-            } else {
-                throw new Error(result.error);
+        // ── Modo tipo directo ──────────────────────────────────────────────────
+        if (currentMode === 'type' && currentDocType) {
+            let renameText = '', fromParts = false, tplId = null;
+            if (_getTypeTemplateIds(currentDocType).length) {
+                updateFileStatus(fileId, 'Extrayendo nombre...', 55);
+                const r = await extractRenameTextForType(file, currentDocType);
+                renameText = r.text || '';
+                fromParts  = r.fromParts || false;
+                tplId      = r.templateId || null;
             }
-        } else {
-            console.log(`🟡 No se encontró número para ${file.name}, enviando a renombrado manual.`);
-            queueForManualRename(file, fileId, detectedMode, text);
+            // Fallback: patrones aprendidos si no hay template OCR configurado
+            if (!renameText && text) {
+                renameText = await _extractByLearnedPattern(text, currentDocType.name);
+            }
+            const expert = await _isExpertForType(currentDocType.name);
+            if (expert) {
+                await processWithType(file, fileId, currentDocType, text, false, renameText, fromParts, tplId);
+            } else {
+                const suggested = generateAdaptiveName(file.name, currentDocType, renameText, fromParts);
+                updateFileStatus(fileId, `💡 Confirmar: ${suggested}`, 70);
+                queueForManualRename(file, fileId, currentDocType.name, text, currentDocType, suggested);
+            }
+            return;
         }
-        
-    } catch (error) {
-        console.error(`❌ Error en processFile (${file.name}):`, error);
-        updateFileStatus(fileId, `❌ Error: ${error.message}`, 100, 'error');
+
+        // ── Modo automático: detectar tipo vía OCR Zonal ──────────────────────
+        if (currentMode === 'auto') {
+            updateFileStatus(fileId, 'Detectando tipo...', 60);
+            const matched = await detectDocumentType(file, text);
+            if (matched && matched.confianza === 'high') {
+                const expert = await _isExpertForType(matched.type.name);
+                if (expert) {
+                    const src = matched.source === 'ml' ? `🤖 ML ${Math.round((matched.mlConfidence||0)*100)}%` : '🎯 Zonas';
+                    updateFileStatus(fileId, `${src} — procesando...`, 65);
+                    await processWithType(file, fileId, matched.type, text, true, matched.renameText, matched.fromParts, matched.templateId);
+                } else {
+                    const suggested = generateAdaptiveName(file.name, matched.type, matched.renameText, matched.fromParts);
+                    updateFileStatus(fileId, `💡 ${matched.type.name} — confirmar...`, 70);
+                    queueForManualRename(file, fileId, matched.type.name, text, matched.type, suggested);
+                }
+            } else if (matched && matched.confianza === 'medium') {
+                const suggested = matched.renameText
+                    ? generateAdaptiveName(file.name, matched.type, matched.renameText, matched.fromParts)
+                    : null;
+                updateFileStatus(fileId, `🟡 Posible: ${matched.type.name} — confirmar...`, 70);
+                queueForManualRename(file, fileId, matched.type.name, text, matched.type, suggested);
+            } else {
+                updateFileStatus(fileId, '⚠️ Tipo no detectado → revisión manual', 70);
+                queueForManualRename(file, fileId, null, text);
+            }
+        }
+    } catch (err) {
+        console.error(`❌ processFile "${file.name}":`, err);
+        updateFileStatus(fileId, `❌ Error: ${err.message}`, 100, 'error');
     }
 }
 
+// ── Helpers OCR zonal ─────────────────────────────────────────────────────────
+
 /**
- * Extrae texto de la primera página de un PDF usando OCR.
- * @param {File} file - El archivo PDF (objeto con .path y .name).
- * @returns {Promise<string>} - El texto extraído.
+ * Carga un PDF y devuelve un mapa pageIndex → canvas renderizado a 3x.
+ * Reutilizable entre detectTypeByOcrZonal y extractRenameTextForType.
  */
-async function extractTextFromPDF(file) {
-    const result = await window.electronAPI.readPdfFile(file.path);
-    if (!result.success) throw new Error(result.error || 'Error al leer el archivo PDF');
+async function _loadPdfCanvases(filePath) {
+    const result = await window.electronAPI.readPdfFile(filePath);
+    if (!result.success) return null;
+    const pdfDoc = await pdfjsLib.getDocument({ data: result.data }).promise;
+    const cache  = {};
 
-    const pdf = await pdfjsLib.getDocument({ data: result.data }).promise;
-    const totalPages = pdf.numPages;
-    const pagesToProcess = maxPagesToProcess === 0
-        ? totalPages
-        : Math.min(totalPages, maxPagesToProcess);
-
-    let combinedText = '';
-    for (let pageNum = 1; pageNum <= pagesToProcess; pageNum++) {
-        const page = await pdf.getPage(pageNum);
-        const scale = 3.0;
-        const viewport = page.getViewport({ scale });
-        const canvas = document.createElement('canvas');
-        canvas.height = viewport.height;
-        canvas.width = viewport.width;
-        await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
-        const { data } = await Tesseract.recognize(canvas.toDataURL('image/png'), 'spa');
-        combinedText += data.text + '\n';
+    async function getCanvas(pageIndex) {
+        if (cache[pageIndex]) return cache[pageIndex];
+        const page = await pdfDoc.getPage(pageIndex + 1);
+        const vp   = page.getViewport({ scale: 3.0 });
+        const c    = document.createElement('canvas');
+        c.width = vp.width; c.height = vp.height;
+        await page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
+        cache[pageIndex] = { canvas: c, vp, page }; // 'page' necesario para getTextContent()
+        return cache[pageIndex];
     }
 
-    console.log(`📜 Texto extraído de ${file.name} (${pagesToProcess}/${totalPages} pág.):\n`, combinedText.substring(0, 500) + '...');
-    return combinedText;
+    return getCanvas;
 }
 
 /**
- * Detecta el tipo de documento basado en palabras clave y patrones en el texto.
- * @param {string} text - El texto extraído del PDF.
- * @returns {string|null} - El tipo de documento detectado o null.
+ * Busca una palabra o frase ancla en la capa de texto del PDF.
+ * Reagrupa ítems por línea (coordenada Y ±5 puntos) para manejar textos divididos.
+ * @returns {number|null} Y normalizada (0=arriba, 1=abajo) o null si no se encontró
  */
-function detectDocumentType(text) {
-    const cleanText = text.toUpperCase();
-    const header = cleanText.substring(0, 400);
+async function _findAnchorY(pdfPage, anchorText) {
+    if (!pdfPage || !anchorText?.trim()) return null;
+    try {
+        const content    = await pdfPage.getTextContent();
+        const vp1        = pdfPage.getViewport({ scale: 1 });
+        const pageHeight = vp1.viewBox ? vp1.viewBox[3] : (vp1.height / vp1.scale);
+        const lower      = anchorText.toLowerCase().trim();
 
-    // Búsqueda por patrones específicos y robustos
-    if (/FACTURA\s+\d\/\d{6}/.test(cleanText)) return 'facturas';
-    if (/DUA\s+\d\/\d+/.test(cleanText)) return 'duas';
-    if (/ENTRADA\s+\d\/\d+/.test(cleanText)) return 'entradas';
-    if (/PEDIDO\s+CLIENTE/.test(cleanText) || /PEDIDO\s*(Nº|N°|NO|#)?\s*\d\s+\d{6}/.test(cleanText)) return 'pedidos';
-    if (/(ALBARAN|ALBARÁN)\s*(Nº|N°|NO|#)?\s*\d\s+\d{6}/.test(cleanText)) return 'albaranes';
+        // Reconstruir líneas agrupando ítems con el mismo Y (±5 puntos PDF)
+        const lineMap = {};
+        for (const item of content.items) {
+            if (!item.str?.trim()) continue;
+            const rawY = item.transform[5];
+            const yKey = Math.round(rawY / 5) * 5;
+            if (!lineMap[yKey]) lineMap[yKey] = { rawY, text: '' };
+            lineMap[yKey].text += item.str;
+        }
 
-    // Búsqueda por palabras clave como fallback
-    if (/FACTURA/.test(header) && /\d\/\d+/.test(header)) return 'facturas';
-    if (/DUA/.test(header) && /\d\/\d+/.test(header)) return 'duas';
-    if (/ENTRADA/.test(header) && /\d\/\d+/.test(header)) return 'entradas';
-    if (/(ALBARAN|ALBARÁN)/.test(header)) return 'albaranes';
-    if (/PEDIDO/.test(header)) return 'pedidos';
+        // Buscar ancla en las líneas reconstruidas
+        for (const line of Object.values(lineMap)) {
+            if (line.text.toLowerCase().includes(lower)) {
+                return Math.max(0, Math.min(1, 1 - line.rawY / pageHeight));
+            }
+        }
 
-    console.log('❓ No se pudo detectar el tipo de documento.');
+        // Fallback: buscar en ítems individuales (por si el texto ancla es una sola palabra)
+        for (const item of content.items) {
+            if (item.str && item.str.toLowerCase().includes(lower)) {
+                return Math.max(0, Math.min(1, 1 - item.transform[5] / pageHeight));
+            }
+        }
+    } catch (e) {
+        console.warn('[Anchor] Error buscando ancla:', e);
+    }
     return null;
 }
 
 /**
- * Enrutador para llamar a la función de extracción de número correcta según el tipo.
- * @param {string} text - Texto del PDF.
- * @param {string} type - Tipo de documento.
- * @returns {string|null} - El número de pedido encontrado.
+ * OCR de una zona recortada de un canvas.
+ * Igual que hace la ventana de entrenamiento — más fiable que filtrar por bbox.
  */
-function extractOrderNumber(text, type) {
-    const extractors = {
-        albaranes: text => text.match(/\b(\d)\s+(\d{6})\b/) ? text.match(/\b(\d)\s+(\d{6})\b/).slice(1).join('') : null,
-        pedidos: text => text.match(/\b\d{7}\b/)?.[0] || null,
-        duas: text => (text.match(/DUA\s+(\d)\/(\d{6})/i) || text.match(/(\d)\/(\d{6})/))?.slice(1).join('') || null,
-        facturas: text => (text.match(/(?:FACTURA|RA)\s+(\d)\/(\d{6})/i))?.slice(1).join('') || null,
-        entradas: text => (text.match(/ENTRADA\s+(\d)\/(\d{6})/i) || text.match(/(\d)\/(\d{6})/))?.slice(1).join('') || null,
-    };
-    return extractors[type] ? extractors[type](text) : null;
+async function _ocrCrop(canvas, vp, normRect) {
+    const zx = normRect.x * vp.width,  zy = normRect.y * vp.height;
+    const zw = normRect.w * vp.width,  zh = normRect.h * vp.height;
+    const crop = document.createElement('canvas');
+    crop.width  = Math.max(1, Math.round(zw));
+    crop.height = Math.max(1, Math.round(zh));
+    crop.getContext('2d').drawImage(canvas, zx, zy, zw, zh, 0, 0, zw, zh);
+    const { data } = await Tesseract.recognize(crop.toDataURL('image/png'), 'spa');
+    return data.text.replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/** Similitud de texto por palabras en común. */
+function _similarity(extracted, saved) {
+    if (!extracted || !saved) return 0;
+    const words = saved.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+    if (!words.length) return 0;
+    const ext = extracted.toLowerCase();
+    return words.filter(w => ext.includes(w)).length / words.length;
 }
 
 /**
- * Genera el nuevo nombre de archivo basado en el número, tipo y contenido.
- * @param {string} orderNumber - Número de 7 dígitos.
- * @param {string} docType - Tipo de documento.
- * @param {string} text - Texto del PDF para buscar palabras clave adicionales.
- * @returns {string} - El nuevo nombre de archivo.
+ * Extrae la "huella" de un texto OCR: palabras únicas y significativas.
+ * Usada para comparar documentos similares en el sistema de aprendizaje.
  */
-function generateNewFilename(orderNumber, docType, text) {
-    const formatted = formatOrderNumber(orderNumber);
-    const suffixes = {
-        albaranes: 'ALBARAN',
-        pedidos: `PEDIDO ALMACEN${/\b(RESTOS|RESTO)\b/i.test(text) ? ' RESTO' : ''}`,
-        duas: 'DUA',
-        facturas: 'FACTURA',
-        entradas: 'ENTRADA',
-    };
-    return `${formatted} ${suffixes[docType] || 'DOCUMENTO'}.pdf`;
+function _extractFingerprint(ocrText) {
+    if (!ocrText) return [];
+    const stopwords = new Set([
+        'para', 'como', 'pero', 'este', 'esta', 'esto', 'esos', 'esas',
+        'son', 'han', 'hay', 'ser', 'fue', 'era', 'tiene', 'puede', 'debe',
+        'desde', 'hasta', 'entre', 'sobre', 'también', 'cuando', 'todo',
+        'cada', 'donde', 'mismo', 'misma', 'otro', 'otra', 'todos', 'todas',
+        'dicho', 'dicha', 'fecha', 'numero', 'número', 'total', 'importe'
+    ]);
+    return [...new Set(
+        ocrText.toLowerCase()
+            .normalize('NFD').replace(/[̀-ͯ]/g, '')  // quitar tildes
+            .replace(/[^a-z\s]/g, ' ')
+            .split(/\s+/)
+            .filter(w => w.length >= 4 && !stopwords.has(w))
+    )].slice(0, 25);
 }
 
 /**
- * Formatea un número de 7 dígitos a "S-NNNNNN".
- * @param {string} orderNumber - El número de 7 dígitos.
- * @returns {string} - El número formateado.
+ * Aplica una transformación de texto al resultado OCR de una zona de renombrado.
  */
-function formatOrderNumber(orderNumber) {
-    if (orderNumber && orderNumber.length === 7) {
-        const serie = orderNumber[0];
-        const codigo = parseInt(orderNumber.substring(1), 10);
-        return `${serie}-${codigo}`;
+function _applyPartTransform(text, transform) {
+    switch (transform) {
+        case 'strip_zeros':   return text.replace(/\b0+(\d)/g, '$1');
+        case 'upper':         return text.toUpperCase();
+        case 'lower':         return text.toLowerCase();
+        case 'replace_slash': return text.replace(/\//g, '-');
+        case 'numbers_only':  return text.replace(/[^\d]/g, '');
+        default:              return text;
     }
-    return orderNumber;
 }
 
-// =================================================================================
-// --- GESTIÓN DE RENOMBRADO MANUAL (MODAL) ---
-// =================================================================================
+/**
+ * Busca un dato en el texto completo de una página usando delimitadores de texto.
+ * Primero intenta la capa de texto nativa del PDF; si no hay texto, hace OCR completo.
+ * @param {Function} getCanvas  - función async (pageIndex) → { canvas, vp, page }
+ * @param {number}   pageIndex  - 0-indexed
+ * @param {string}   before     - texto que aparece ANTES del dato (obligatorio)
+ * @param {string}   after      - texto que aparece DESPUÉS del dato (vacío = fin de línea)
+ * @returns {Promise<string>}   - texto extraído o cadena vacía
+ */
+async function _searchTextByKeyword(getCanvas, pageIndex, before, after) {
+    if (!before?.trim()) return '';
+
+    const beforeLower = before.trim().toLowerCase();
+    const afterLower  = after?.trim().toLowerCase() || '';
+
+    let fullText = '';
+
+    // 1. Intentar capa de texto nativa del PDF
+    try {
+        const pg      = await getCanvas(pageIndex);
+        const content = await pg.page.getTextContent();
+        // Reconstruir texto completo respetando saltos de línea por posición Y
+        const lineMap = {};
+        for (const item of content.items) {
+            if (!item.str) continue;
+            const yKey = Math.round(item.transform[5] / 5) * 5;
+            if (!lineMap[yKey]) lineMap[yKey] = { rawY: item.transform[5], text: '' };
+            lineMap[yKey].text += item.str + ' ';
+        }
+        fullText = Object.values(lineMap)
+            .sort((a, b) => b.rawY - a.rawY)   // orden visual (top→bottom)
+            .map(l => l.text.replace(/\s+/g, ' ').trim())
+            .filter(Boolean)
+            .join('\n');
+    } catch (_) {}
+
+    // 2. Fallback: OCR de página completa (documentos escaneados sin capa de texto)
+    if (!fullText.trim()) {
+        try {
+            const pg  = await getCanvas(pageIndex);
+            const vp  = pg.page.getViewport({ scale: 2.5 });
+            const cnv = document.createElement('canvas');
+            cnv.width  = vp.width;  cnv.height = vp.height;
+            await pg.page.render({ canvasContext: cnv.getContext('2d'), viewport: vp }).promise;
+            const { data } = await Tesseract.recognize(cnv.toDataURL('image/png'), 'spa');
+            fullText = data.text || '';
+        } catch (_) { return ''; }
+    }
+
+    // 3. Buscar "before" en el texto y extraer lo que sigue
+    const textLower = fullText.toLowerCase();
+    const idx = textLower.indexOf(beforeLower);
+    if (idx === -1) return '';
+
+    const start = idx + beforeLower.length;
+    const rest  = fullText.slice(start).replace(/^\s+/, '');   // quitar espacio inicial
+
+    // Delimitar: hasta afterLower o hasta el fin de la línea
+    let extracted = '';
+    if (afterLower) {
+        const endIdx = rest.toLowerCase().indexOf(afterLower);
+        extracted = endIdx !== -1 ? rest.slice(0, endIdx) : rest.split(/\r?\n/)[0];
+    } else {
+        extracted = rest.split(/\r?\n/)[0];
+    }
+
+    return extracted.replace(/\s+/g, ' ').trim();
+}
 
 /**
- * Añade un archivo a la cola de renombrado manual y abre la ventana si es el primero.
- * @param {File} file - El archivo a renombrar.
- * @param {string} fileId - ID del elemento DOM.
- * @param {string|null} detectedType - Tipo detectado (si lo hay).
- * @param {string} ocrText - Texto extraído del PDF.
+ * Construye el nombre de archivo desde las partes de una plantilla.
+ * Soporta el nuevo formato (renameParts) y el antiguo (rename.rect) para compatibilidad.
  */
-async function queueForManualRename(file, fileId, detectedType, ocrText, isFromWatch = false) {
-    updateFileStatus(fileId, '⌛ Esperando entrada manual...', 70);
+async function _buildRenameText(getCanvas, tpl) {
+    // Nuevo formato: array de partes
+    if (Array.isArray(tpl.renameParts) && tpl.renameParts.length) {
+        const segments = [];
+        for (const part of tpl.renameParts) {
+            if (part.type === 'text') {
+                segments.push(part.value || '');
+            } else if (part.type === 'text-search' && part.before) {
+                // Buscar en las primeras páginas (normalmente la etiqueta está en la 1ª o 2ª)
+                let text = '';
+                for (let pi = 0; pi < 3; pi++) {
+                    try {
+                        text = await _searchTextByKeyword(getCanvas, pi, part.before, part.after || '');
+                        if (text) break;
+                    } catch (_) { break; }
+                }
+                text = _applyPartTransform(text, part.transform || 'none');
+                segments.push(text);
+            } else if (part.type === 'ocr' && part.rect) {
+                const pg  = await getCanvas(part.page || 0);
+                let rect  = part.rect;
 
-    // Leer el archivo PDF desde el disco
-    const result = await window.electronAPI.readPdfFile(file.path);
+                // ── Palabra ancla: ajustar zona si el layout se ha desplazado ──
+                if (part.anchor?.text && part.anchor?.refY != null) {
+                    const currentY = await _findAnchorY(pg.page, part.anchor.text);
+                    if (currentY !== null) {
+                        const deltaY = currentY - part.anchor.refY;
+                        if (Math.abs(deltaY) > 0.005) { // ignorar ruido < 0.5%
+                            rect = {
+                                ...rect,
+                                y: Math.max(0, Math.min(0.98 - rect.h, rect.y + deltaY))
+                            };
+                            console.log(`[Anchor] "${part.anchor.text}": desplazamiento ${(deltaY * 100).toFixed(1)}%`);
+                        }
+                    } else {
+                        console.warn(`[Anchor] No encontrada: "${part.anchor.text}" — usando posición original`);
+                    }
+                }
 
-    if (!result.success) {
-        updateFileStatus(fileId, `❌ Error al leer PDF: ${result.error}`, 100, 'error');
+                let text = await _ocrCrop(pg.canvas, pg.vp, rect);
+                text = _applyPartTransform(text, part.transform || 'none');
+                segments.push(text);
+            }
+        }
+        return segments.join('').trim();
+    }
+    // Compatibilidad con plantillas antiguas (campo rename)
+    if (tpl.rename?.rect) {
+        const rn = await getCanvas(tpl.rename.page || 0);
+        return await _ocrCrop(rn.canvas, rn.vp, tpl.rename.rect);
+    }
+    return '';
+}
+
+/**
+ * Detección combinada: ML (Naive Bayes + TF-IDF) + Zonas OCR.
+ *
+ * Pipeline:
+ *  1. ML clasifica el texto OCR → obtiene tipo + confianza
+ *  2. Si ML tiene alta confianza y suficientes ejemplos → usa resultado ML
+ *     (y aplica zonas OCR del template asociado para extraer el texto de renombrado)
+ *  3. Si ML tiene confianza media → lo usa como hint para reducir candidatos en zonas
+ *  4. Si ML falla o confianza baja → cae en detección pura por zonas OCR
+ *  5. Si nada funciona → renombrado manual
+ */
+async function detectDocumentType(file, ocrText) {
+    // ── Clasificación ML ──────────────────────────────────────────────────────
+    let mlResult = null;
+    try {
+        mlResult = await window.electronAPI.mlClassify(ocrText || '');
+    } catch (_) {}
+
+    // ── Búsqueda del tipo de usuario por nombre ML ────────────────────────────
+    let mlType = null;
+    if (mlResult?.type && mlResult.docCount >= 5) {
+        mlType = userDocTypes.find(t =>
+            t.name.toLowerCase() === mlResult.type.toLowerCase()
+        );
+    }
+
+    // ── Alta confianza ML (≥0.80) + suficientes ejemplos ─────────────────────
+    if (mlType && mlResult.confidence >= 0.80 && mlResult.docCount >= 5) {
+        let renameText = '', fromParts = false, templateId = null;
+        if (_getTypeTemplateIds(mlType).length) {
+            try {
+                const r  = await extractRenameTextForType(file, mlType);
+                renameText = r.text || '';
+                fromParts  = r.fromParts || false;
+                templateId = r.templateId || null;
+            } catch (_) {}
+        }
+        // Fallback: patrones aprendidos de ejemplos manuales
+        if (!renameText && ocrText) {
+            renameText = await _extractByLearnedPattern(ocrText, mlType.name);
+        }
+        return {
+            type: mlType, renameText, fromParts, templateId,
+            confianza: 'high', source: 'ml',
+            mlConfidence: mlResult.confidence,
+        };
+    }
+
+    // ── Detección por zonas OCR (con hint ML como filtro) ────────────────────
+    const zoneResult = await detectTypeByOcrZonal(file, mlType);
+    if (zoneResult) {
+        // Fallback: si las zonas detectaron el tipo pero no extrajeron rename text
+        if (!zoneResult.renameText && ocrText) {
+            zoneResult.renameText = await _extractByLearnedPattern(ocrText, zoneResult.type.name);
+        }
+        return { ...zoneResult, source: 'zones', mlConfidence: mlResult?.confidence };
+    }
+
+    // ── ML con confianza media como sugerencia ────────────────────────────────
+    if (mlType && mlResult.confidence >= 0.50 && mlResult.docCount >= 3) {
+        return {
+            type: mlType, renameText: '', fromParts: false, templateId: null,
+            confianza: 'medium', source: 'ml_hint',
+            mlConfidence: mlResult.confidence,
+        };
+    }
+
+    return null;
+}
+
+/**
+ * Detecta el tipo de documento y extrae el texto de renombrado usando zonas visuales.
+ * Itera TODOS los tipos y TODAS sus plantillas vinculadas → elige la mejor coincidencia global.
+ * @param {object|null} mlHint - Tipo sugerido por ML (prioriza ese tipo si hay empate)
+ */
+async function detectTypeByOcrZonal(file, mlHint = null) {
+    const typesWithTemplate = userDocTypes.filter(t => _getTypeTemplateIds(t).length > 0);
+    if (!typesWithTemplate.length) return null;
+
+    const allTemplates = await window.electronAPI.getOcrTemplates();
+    if (!allTemplates?.length) return null;
+
+    const tplMap = {};
+    allTemplates.forEach(t => { tplMap[t.id] = t; });
+
+    const getCanvas = await _loadPdfCanvases(file.path);
+    if (!getCanvas) return null;
+
+    let best = null, bestScore = 0;
+
+    for (const type of typesWithTemplate) {
+        const tplIds = _getTypeTemplateIds(type);
+
+        for (const tplId of tplIds) {
+            const tpl = tplMap[tplId];
+            if (!tpl?.identification?.rect) continue;
+            // Debe tener al menos un sistema de renombrado válido
+            const hasRename = (Array.isArray(tpl.renameParts) && tpl.renameParts.length) || tpl.rename?.rect;
+            if (!hasRename) continue;
+
+            // Extraer y comparar zona de identificación
+            const id    = await getCanvas(tpl.identification.page || 0);
+            const idTxt = await _ocrCrop(id.canvas, id.vp, tpl.identification.rect);
+            const score = _similarity(idTxt, tpl.identification.text);
+
+            // Pequeño bonus si ML sugirió este mismo tipo (desempate)
+            const adjustedScore = score + (mlHint && mlHint.id === type.id ? 0.02 : 0);
+
+            if (score >= 0.6 && adjustedScore > bestScore) {
+                const renameText = await _buildRenameText(getCanvas, tpl);
+                bestScore = adjustedScore;
+                best = {
+                    type,
+                    renameText,
+                    fromParts:  Array.isArray(tpl.renameParts) && tpl.renameParts.length > 0,
+                    templateId: tpl.id,
+                    confianza:  score >= 0.85 ? 'high' : 'medium'
+                };
+            }
+        }
+    }
+
+    return best;
+}
+
+/**
+ * Extrae el texto de renombrado para un tipo concreto (modo tipo directo o ML de alta confianza).
+ * Con una sola plantilla la usa directamente; con varias, compara zonas de identificación
+ * y elige la que mejor encaje con el documento actual (ej: proveedor A vs proveedor B).
+ * Siempre devuelve { text, fromParts, templateId }.
+ */
+async function extractRenameTextForType(file, type) {
+    const tplIds = _getTypeTemplateIds(type);
+    if (!tplIds.length) return { text: '', fromParts: false, templateId: null };
+
+    const allTemplates = await window.electronAPI.getOcrTemplates();
+    if (!allTemplates?.length) return { text: '', fromParts: false, templateId: null };
+
+    const tplMap = {};
+    allTemplates.forEach(t => { tplMap[t.id] = t; });
+
+    const getCanvas = await _loadPdfCanvases(file.path);
+    if (!getCanvas) return { text: '', fromParts: false, templateId: null };
+
+    // ── Una sola plantilla: sin necesidad de comparar ────────────────────────
+    if (tplIds.length === 1) {
+        const tpl = tplMap[tplIds[0]];
+        if (!tpl) return { text: '', fromParts: false, templateId: null };
+        const text = await _buildRenameText(getCanvas, tpl);
+        return { text, fromParts: Array.isArray(tpl.renameParts) && tpl.renameParts.length > 0, templateId: tpl.id };
+    }
+
+    // ── Varias plantillas: elegir la de mayor similitud en zona de identificación
+    let bestTpl = null, bestScore = -1;
+
+    for (const tplId of tplIds) {
+        const tpl = tplMap[tplId];
+        if (!tpl) continue;
+        if (!tpl.identification?.rect) {
+            // Sin zona de identificación: candidato de reserva (score 0) si ninguno puntúa más
+            if (bestScore < 0) { bestTpl = tpl; bestScore = 0; }
+            continue;
+        }
+        const id    = await getCanvas(tpl.identification.page || 0);
+        const idTxt = await _ocrCrop(id.canvas, id.vp, tpl.identification.rect);
+        const score = _similarity(idTxt, tpl.identification.text);
+        if (score > bestScore) { bestScore = score; bestTpl = tpl; }
+    }
+
+    if (!bestTpl) return { text: '', fromParts: false, templateId: null };
+    const text = await _buildRenameText(getCanvas, bestTpl);
+    return {
+        text,
+        fromParts:  Array.isArray(bestTpl.renameParts) && bestTpl.renameParts.length > 0,
+        templateId: bestTpl.id
+    };
+}
+
+/**
+ * Renombra y mueve un archivo usando un tipo concreto.
+ * @param {string}  renameText - Texto extraído de la zona de renombrado
+ * @param {boolean} fromParts  - true si el texto viene de un parts builder (el usuario controló el formato completo)
+ */
+async function processWithType(file, fileId, type, text, autoDetected, renameText, fromParts = false, templateId = null) {
+    const targetFolder = type.folder || destinationFolder;
+    if (!targetFolder) {
+        updateFileStatus(fileId, `⚠️ "${type.name}" sin carpeta destino → renombrado manual`, 70);
+        queueForManualRename(file, fileId, type.name, text, type);
         return;
     }
 
-    const pdf = await pdfjsLib.getDocument({ data: result.data }).promise;
-    const page = await pdf.getPage(1);
+    // Generar nombre del archivo
+    let newName = generateAdaptiveName(file.name, type, renameText, fromParts);
 
-    // Renderizar la página a datos de imagen para enviarla a la ventana
-    const scale = 2.0;
-    const viewport = page.getViewport({ scale });
-    const canvas = document.createElement('canvas');
-    canvas.height = viewport.height;
-    canvas.width = viewport.width;
-    const context = canvas.getContext('2d');
-    await page.render({ canvasContext: context, viewport }).promise;
-
-    // Convertir canvas a ArrayBuffer
-    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
-    const pageData = await blob.arrayBuffer();
-
-    manualRenameQueue.push({
-        file,
-        fileId,
-        detectedType,
-        ocrText,
-        pageData,
-        isFromWatch
-    });
-
-    if (manualRenameQueue.length === 1) {
-        await processNextManualRename();
-    }
-}
-
-/**
- * Procesa el siguiente archivo en la cola de renombrado manual.
- */
-async function processNextManualRename() {
-    if (manualRenameQueue.length > 0) {
-        const next = manualRenameQueue[0];
-        await openManualRenameWindow(next);
-    }
-}
-
-/**
- * Abre la ventana de renombrado manual con los datos del archivo.
- * @param {object} queueItem - El objeto de la cola con los datos del archivo.
- */
-async function openManualRenameWindow({ file, fileId, detectedType, ocrText, pageData, isFromWatch }) {
-    currentManualFile = file;
-    currentManualFileId = fileId;
-    if (isFromWatch) currentManualFile._isFromWatch = true;
-
-    const fileData = {
-        fileName: file.name,
-        pageData: pageData,
-        detectedType: detectedType,
-        currentMode: isFromWatch ? 'auto' : currentMode,
-        queueCount: manualRenameQueue.length,
-        ocrText: ocrText,
-        // filePath para que el handler pueda recuperarlo al confirmar
-        filePath: isFromWatch ? file.path : undefined,
-        isFromSearch: false
-    };
-
-    await window.electronAPI.openManualRenameWindow(fileData);
-}
-
-/**
- * Maneja la confirmación del renombrado desde la ventana
- * @param {object} data - Datos del renombrado (orderNumber, selectedType, ocrText)
- */
-async function handleManualRenameConfirmed(data) {
-    const { orderNumber, selectedType, ocrText, filePath, isFromSearch } = data;
-    const isFromWatch = !isFromSearch && currentManualFile?._isFromWatch === true;
-
-    const newFileName = generateNewFilename(orderNumber, selectedType, ocrText);
-
-    let targetFolder;
-    if (isFromSearch) {
-        targetFolder = localStorage.getItem(`auto-folder-${selectedType}`);
-        if (!targetFolder) {
-            alert(`Error: No hay carpeta configurada para ${selectedType}.\n\nPor favor, configura las carpetas en el modo "Detección Automática".`);
-            return;
-        }
-        console.log(`📁 Usando carpeta del modo auto para ${selectedType}: ${targetFolder}`);
-    } else if (isFromWatch) {
-        targetFolder = destinationFolders[selectedType] || localStorage.getItem(`auto-folder-${selectedType}`);
-        if (!targetFolder) {
-            updateFileStatus(currentManualFileId, `❌ Sin carpeta configurada para ${selectedType}`, 100, 'error');
-            currentManualFile = null;
-            currentManualFileId = null;
-            manualRenameQueue.shift();
-            await processNextManualRename();
-            return;
-        }
-    } else if (currentMode === 'manual') {
-        // En modo manual, no se requiere carpeta destino, se renombra in-situ
-        targetFolder = null; 
-    } else {
-        targetFolder = currentMode === 'auto' ? destinationFolders[selectedType] : destinationFolder;
-        if (!targetFolder) {
-            alert(`Error: No hay carpeta configurada para ${selectedType}`);
-            return;
-        }
-    }
-
-    const sourceFilePath = isFromSearch ? filePath : (isFromWatch ? filePath : currentManualFile.path);
-
-    if (isFromSearch) {
-        console.log(`🔍 Renombrando desde búsqueda: ${sourceFilePath} → ${newFileName}`);
-    } else {
-        updateFileStatus(currentManualFileId, currentMode === 'manual' ? 'Renombrando archivo...' : 'Moviendo archivo...', 90);
-    }
-
-    let result;
-    if (currentMode === 'manual' && !isFromSearch && !isFromWatch) {
-        // Renombrar en la misma carpeta
-        result = await window.electronAPI.renameFile(sourceFilePath, newFileName);
-    } else {
-        // Mover a la carpeta destino
-        const createSubfolder = (selectedType === 'pedidos');
-        result = await window.electronAPI.moveFile(sourceFilePath, targetFolder, newFileName, createSubfolder);
-    }
+    updateFileStatus(fileId, 'Moviendo archivo...', 80);
+    const result = await window.electronAPI.moveFile(file.path, targetFolder, newName, false);
 
     if (result.success) {
-        if (isFromSearch) {
-            console.log(`✅ Archivo movido/renombrado exitosamente desde búsqueda: ${result.newPath}`);
+        updateFileStatus(fileId, `✅ ${newName}`, 100, 'success');
+        processedFiles.add(file.path);
+        fileCounter++;
+        updateFileCounter();
+        await saveToOCRIndex(result.newPath, newName, text, type.name);
+        console.log(`✅ [${type.name}] ${newName}`);
 
-            // Eliminar la entrada antigua del índice OCR
-            if (ocrIndex[sourceFilePath]) {
-                console.log(`🗑️ Eliminando entrada antigua del índice: ${sourceFilePath}`);
-                delete ocrIndex[sourceFilePath];
-            }
-        } else {
-            updateFileStatus(currentManualFileId, `✅ Movido: ${newFileName}`, 100, 'success');
-            processedFiles.add(currentManualFile.path);
-            fileCounter++;
-            updateFileCounter();
+        // 🧠 Aprendizaje ML
+        try { await window.electronAPI.mlTrain(text, type.name); _mlStatsCache = null; } catch (_) {}
+        // 🧠 Aprendizaje de patrón de renombrado (dónde está el número en el documento)
+        if (text && renameText) {
+            try {
+                await window.electronAPI.learnRenamePattern(type.name, text, newName);
+                _invalidatePatternCache(type.name);
+            } catch (_) {}
         }
-
-        // Guardar la nueva entrada en el índice OCR
-        await saveToOCRIndex(result.newPath, newFileName, ocrText, selectedType);
+        if (templateId) {
+            try { await window.electronAPI.incrementOcrConfirmations(templateId); } catch (_) {}
+        }
     } else {
-        if (isFromSearch) {
-            alert(`❌ Error al mover el archivo:\n\n${result.error}`);
-        } else {
-            updateFileStatus(currentManualFileId, `❌ Error al mover: ${result.error}`, 100, 'error');
-        }
-    }
-
-    // Si no viene desde búsqueda, pasar al siguiente archivo en la cola
-    if (!isFromSearch) {
-        currentManualFile = null;
-        currentManualFileId = null;
-        manualRenameQueue.shift();
-        await processNextManualRename();
+        throw new Error(result.error);
     }
 }
 
 /**
- * Maneja cuando se omite el archivo desde la ventana
+ * Genera el nombre adaptativo del archivo.
+ * - fromParts=true : el usuario configuró el formato completo → usar renameText tal cual
+ * - fromParts=false: zona OCR simple → prefijar con nombre del tipo (ej: "ENTRADA 001")
+ * - Sin renameText  : fallback → nombre original + tipo
  */
-function handleManualRenameSkipped() {
-    updateFileStatus(currentManualFileId, '↪️ Omitido por el usuario', 100, 'skipped');
+function generateAdaptiveName(originalName, type, renameText, fromParts = false) {
+    if (renameText && renameText.trim()) {
+        const clean = renameText.replace(/[\\/:*?"<>|]/g, '').replace(/\s+/g, ' ').trim();
+        if (clean.length > 2) {
+            // Con parts builder el usuario controla todo; sin parts, anteponemos el tipo
+            if (fromParts) return `${clean}.pdf`;
+            return `${type.name} ${clean}.pdf`;
+        }
+    }
+    // Fallback: nombre original normalizado + tipo
+    const base = originalName.replace(/\.pdf$/i, '').replace(/[\\/:*?"<>|]/g, '').trim();
+    return `${base} ${type.name}.pdf`;
+}
 
-    // Pasar al siguiente archivo en la cola
+/**
+ * Procesa un archivo detectado por watch folder.
+ */
+async function processWatchedFile(fileData) {
+    const file   = { path: fileData.path, name: fileData.name };
+    const fileId = `file-${Date.now()}-${Math.random()}`;
+    file.fileId  = fileId;
+
+    // Recargar tipos actualizados
+    try { userDocTypes = await window.electronAPI.getDocTypes(); } catch (e) {}
+
+    const list = document.getElementById('file-list');
+    list.insertBefore(createFileItem(file, fileId), list.firstChild);
+    processedFiles.add(file.path);
+
+    try {
+        updateFileStatus(fileId, 'Extrayendo texto...', 30);
+        const text = await extractTextFromPDF(file);
+
+        updateFileStatus(fileId, 'Detectando tipo...', 60);
+        const matched = await detectDocumentType(file, text);
+
+        const errorFolder = localStorage.getItem('watch-error-folder');
+
+        // Solo auto-renombrar si: es experto Y (la detección vino de zona OCR O la confianza ML es suficiente)
+        const expertAndConfident = matched?.confianza === 'high'
+            && await _isExpertForType(matched.type.name)
+            && (matched.source === 'zones' || (matched.mlConfidence || 0) >= 0.65);
+
+        if (expertAndConfident) {
+            // Experto confirmado → renombra automáticamente sin preguntar
+            await processWithType(file, fileId, matched.type, text, true, matched.renameText, matched.fromParts, matched.templateId);
+            _mlStatsCache = null; // Invalidar cache tras entrenamiento en carpeta vigilada
+        } else if (matched?.confianza === 'high' || matched?.confianza === 'medium') {
+            // Zilo detectó el tipo pero aún no es experto: mover a incidencias para revisión manual
+            // Entrenar ML igualmente con la detección parcial para acelerar el aprendizaje
+            try {
+                await window.electronAPI.mlTrain(text, matched.type.name);
+                _mlStatsCache = null;
+            } catch (_) {}
+
+            if (errorFolder) {
+                const hint = `_REVISAR_${matched.type.name}`;
+                const hintName = file.name.replace(/\.pdf$/i, `${hint}.pdf`);
+                updateFileStatus(fileId, `💡 ${matched.type.name} — movido a revisión`, 80);
+                await window.electronAPI.moveFile(file.path, errorFolder, hintName, false);
+                updateFileStatus(fileId, `💡 Revisión pendiente → ${hintName}`, 100, 'skipped');
+            } else {
+                updateFileStatus(fileId, `💡 ${matched.type.name} — sin carpeta de revisión`, 100, 'skipped');
+            }
+        } else {
+            if (errorFolder) {
+                updateFileStatus(fileId, '⚠️ Sin detección → incidencias', 80);
+                await window.electronAPI.moveFile(file.path, errorFolder, file.name, false);
+                updateFileStatus(fileId, '⚠️ Movido a incidencias', 100, 'skipped');
+            } else {
+                updateFileStatus(fileId, '⚠️ Tipo no detectado', 100, 'skipped');
+            }
+        }
+    } catch (err) {
+        console.error('[WATCH] Error:', err);
+        updateFileStatus(fileId, `❌ Error: ${err.message}`, 100, 'error');
+    }
+}
+
+// =================================================================================
+// COLA DE RENOMBRADO MANUAL
+// =================================================================================
+
+function setupManualRenameListeners() {
+    window.electronAPI.onManualRenameConfirmed(async data => {
+        await handleManualRenameConfirmed(data);
+    });
+    window.electronAPI.onManualRenameSkipped(() => handleManualRenameSkipped());
+}
+
+function queueForManualRename(file, fileId, detectedType, ocrText, suggestedType = null, suggestedFileName = null) {
+    const label = suggestedFileName ? '💡 Confirmar sugerencia...' : '⏳ En cola de revisión...';
+    updateFileStatus(fileId, label, 75);
+    manualRenameQueue.push({ file, fileId, detectedType, ocrText, suggestedType, suggestedFileName });
+    if (!currentManualFile) processNextManualRename();
+}
+
+async function processNextManualRename() {
+    if (!manualRenameQueue.length) { currentManualFile = null; return; }
+    const { file, fileId, detectedType, ocrText, suggestedType, suggestedFileName } = manualRenameQueue.shift();
+    currentManualFile   = file;
+    currentManualFileId = fileId;
+    currentManualFile._suggestedType = suggestedType;
+
+    // Cargar plantillas OCR para que la ventana pueda mostrar el formulario dinámico
+    let templates = [];
+    try { templates = await window.electronAPI.getOcrTemplates() || []; } catch (_) {}
+
+    try {
+        await window.electronAPI.openManualRenameWindow({
+            fileName:          file.name,
+            filePath:          file.path,
+            detectedType:      detectedType || '',
+            ocrText:           ocrText || '',
+            currentMode:       'auto',
+            docTypes:          userDocTypes,
+            templates,
+            suggestedFileName: suggestedFileName || '',
+            queueCount:        manualRenameQueue.length + 1,
+        });
+    } catch (err) {
+        // Si la ventana falla al abrirse, no bloquear la cola — saltar este archivo
+        console.error('[Cola manual] Error al abrir ventana, saltando archivo:', file.name, err);
+        updateFileStatus(fileId, '❌ Error al abrir ventana de revisión', 100, 'error');
+        currentManualFile   = null;
+        currentManualFileId = null;
+        processNextManualRename();
+    }
+}
+
+async function handleManualRenameConfirmed(data) {
+    const file   = currentManualFile;
+    const fileId = currentManualFileId;
+    if (!file) return;
+
+    try {
+        // Buscar carpeta destino: prioridad → tipo seleccionado → folder de la data
+        let targetFolder = data.destinationFolder || '';
+        if (data.selectedTypeId) {
+            const t = userDocTypes.find(x => x.id === parseInt(data.selectedTypeId));
+            if (t?.folder) targetFolder = t.folder;
+        }
+        if (!targetFolder) {
+            updateFileStatus(fileId, '⚠️ Sin carpeta destino', 100, 'skipped');
+            processedFiles.add(file.path);
+        } else {
+            const result = await window.electronAPI.moveFile(file.path, targetFolder, data.newFileName, false);
+            if (result.success) {
+                updateFileStatus(fileId, `✅ ${data.newFileName}`, 100, 'success');
+                processedFiles.add(file.path);
+                fileCounter++;
+                updateFileCounter();
+                await saveToOCRIndex(result.newPath, data.newFileName, data.ocrText || '', data.selectedType || 'manual');
+
+                // 🧠 Aprendizaje ML
+                const ocrForML  = data.ocrText || '';
+                const typeForML = data.selectedType || '';
+                if (ocrForML && typeForML) {
+                    try { await window.electronAPI.mlTrain(ocrForML, typeForML); _mlStatsCache = null; } catch (_) {}
+                }
+                // 🧠 Aprendizaje de patrón de renombrado (dónde está el número)
+                if (ocrForML && typeForML && data.newFileName) {
+                    try {
+                        await window.electronAPI.learnRenamePattern(typeForML, ocrForML, data.newFileName);
+                        _invalidatePatternCache(typeForML);
+                    } catch (_) {}
+                }
+                if (data.templateId) {
+                    try { await window.electronAPI.incrementOcrConfirmations(data.templateId); } catch (_) {}
+                }
+                // Registrar patrón pendiente para el panel OCR Zonal
+                try {
+                    const fp = _extractFingerprint(ocrForML);
+                    if (fp.length >= 3) {
+                        await window.electronAPI.addPendingPattern({
+                            fingerprint: fp,
+                            typeName:    typeForML,
+                            typeId:      data.selectedTypeId ? parseInt(data.selectedTypeId) : null,
+                            finalName:   data.newFileName,
+                        });
+                    }
+                } catch (_) {}
+            } else {
+                updateFileStatus(fileId, `❌ ${result.error}`, 100, 'error');
+            }
+        }
+    } catch (err) {
+        updateFileStatus(fileId, `❌ Error: ${err.message}`, 100, 'error');
+    }
+
     currentManualFile = null;
-    currentManualFileId = null;
-    manualRenameQueue.shift();
+    processNextManualRename();
+}
+
+function handleManualRenameSkipped() {
+    if (currentManualFileId) updateFileStatus(currentManualFileId, '↪️ Omitido', 100, 'skipped');
+    currentManualFile = null;
     processNextManualRename();
 }
 
 // =================================================================================
-// --- SISTEMA DE BÚSQUEDA OCR ---
+// OCR — EXTRACCIÓN DE TEXTO
 // =================================================================================
 
-/**
- * Carga el índice OCR desde el archivo JSON.
- */
+async function extractTextFromPDF(file) {
+    const result = await window.electronAPI.readPdfFile(file.path);
+    if (!result.success) throw new Error(result.error || 'Error al leer el PDF');
+
+    const pdf          = await pdfjsLib.getDocument({ data: result.data }).promise;
+    const totalPages   = pdf.numPages;
+    const pagesToProc  = maxPagesToProcess === 0 ? totalPages : Math.min(totalPages, maxPagesToProcess);
+    let   combinedText = '';
+
+    for (let pageNum = 1; pageNum <= pagesToProc; pageNum++) {
+        const page     = await pdf.getPage(pageNum);
+        const viewport = page.getViewport({ scale: 3.0 });
+        const canvas   = document.createElement('canvas');
+        canvas.width   = viewport.width;
+        canvas.height  = viewport.height;
+        await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+        const { data } = await Tesseract.recognize(canvas.toDataURL('image/png'), 'spa');
+        combinedText  += data.text + '\n';
+    }
+
+    return combinedText;
+}
+
+// =================================================================================
+// ÍNDICE OCR
+// =================================================================================
+
 async function loadOCRIndex() {
     try {
         const result = await window.electronAPI.loadOCRIndex();
-        ocrIndex = result.success && result.data ? result.data : {};
-        console.log(`📖 Índice OCR cargado con ${Object.keys(ocrIndex).length} documentos.`);
-    } catch (error) {
-        console.error('Error al cargar índice OCR:', error);
-        ocrIndex = {};
-    }
+        if (result.success) ocrIndex = result.data || {};
+    } catch (e) {}
 }
 
-/**
- * Guarda una nueva entrada en el índice OCR.
- * @param {string} filePath - Ruta completa del archivo.
- * @param {string} fileName - Nombre del archivo.
- * @param {string} ocrText - Texto extraído.
- * @param {string} docType - Tipo de documento.
- */
-async function saveToOCRIndex(filePath, fileName, ocrText, docType) {
+async function saveToOCRIndex(filePath, fileName, text, docType) {
     try {
-        ocrIndex[filePath] = {
-            fileName,
-            filePath,
-            docType,
-            ocrText,
-            timestamp: new Date().toISOString(),
-            searchText: ocrText.toUpperCase() // Para búsqueda case-insensitive
-        };
-        const result = await window.electronAPI.saveOCRIndex(ocrIndex);
-        if (result.success) {
-            console.log(`💾 Guardado en índice OCR: ${fileName}`);
-        } else {
-            console.error('Error al guardar índice:', result.error);
-        }
-    } catch (error) {
-        console.error('Error en saveToOCRIndex:', error);
-    }
+        ocrIndex[filePath] = { fileName, text, docType, timestamp: new Date().toISOString() };
+        await window.electronAPI.saveOCRIndex(ocrIndex);
+    } catch (e) {}
 }
 
-
-
 // =================================================================================
-// --- FUNCIONES DE LA INTERFAZ DE USUARIO (UI) ---
+// UI — LISTA DE ARCHIVOS
 // =================================================================================
 
-/**
- * Crea un elemento DOM para un archivo en la lista de procesamiento.
- * @param {File} file - El archivo.
- * @param {string} fileId - El ID único para el elemento DOM.
- * @returns {HTMLElement} - El elemento div creado.
- */
 function createFileItem(file, fileId) {
-    const div = document.createElement('div');
-    div.className = 'file-item';
-    div.id = fileId;
-    div.innerHTML = `
+    const item = document.createElement('div');
+    item.className = 'file-item';
+    item.id        = fileId;
+    item.innerHTML = `
         <div class="file-info">
-            <div class="file-name">${file.name}</div>
-            <div class="file-status">En cola...</div>
-            <div class="progress-bar"><div class="progress-fill"></div></div>
+            <span class="file-icon">📄</span>
+            <div class="file-details">
+                <span class="file-name">${file.name}</span>
+                <span class="file-status">En cola...</span>
+            </div>
         </div>
+        <div class="progress-bar"><div class="progress-fill" style="width:0%"></div></div>
     `;
-    return div;
+    return item;
 }
 
-/**
- * Actualiza el estado visual de un archivo en la lista.
- * @param {string} fileId - ID del elemento DOM.
- * @param {string} message - Mensaje de estado.
- * @param {number} progress - Porcentaje de progreso (0-100).
- * @param {'success'|'error'|'skipped'|'info'} type - Tipo de estado.
- */
-function updateFileStatus(fileId, message, progress, type = 'info') {
-    const fileItem = document.getElementById(fileId);
-    if (!fileItem) return;
+function updateFileStatus(fileId, status, progress, type = '') {
+    const item = document.getElementById(fileId);
+    if (!item) return;
+    const statusEl   = item.querySelector('.file-status');
+    const progressEl = item.querySelector('.progress-fill');
+    if (statusEl)   statusEl.textContent = status;
+    if (progressEl) progressEl.style.width = `${progress}%`;
+    if (type === 'success') item.classList.add('success');
+    if (type === 'error')   item.classList.add('error');
+    if (type === 'skipped') item.classList.add('skipped');
+}
 
-    const statusElement = fileItem.querySelector('.file-status');
-    const progressFill = fileItem.querySelector('.progress-fill');
+function updateFileCounter() {
+    const el = document.getElementById('file-counter');
+    if (el) el.textContent = `${fileCounter} archivo${fileCounter !== 1 ? 's' : ''}`;
+}
 
-    statusElement.innerHTML = message;
-    progressFill.style.width = `${progress}%`;
-    
-    // Resetear clases y aplicar la nueva
-    statusElement.className = 'file-status';
-    progressFill.className = 'progress-fill';
+// =================================================================================
+// CARPETAS Y CANDADO
+// =================================================================================
 
-    if (type === 'success') {
-        statusElement.classList.add('status-success');
-    } else if (type === 'error') {
-        statusElement.classList.add('status-error');
-        progressFill.classList.add('progress-error');
-    } else if (type === 'skipped') {
-        progressFill.classList.add('progress-skipped');
+async function selectDestinationFolder() {
+    const result = await window.electronAPI.selectFolder();
+    if (result.success && result.folder) {
+        destinationFolder = result.folder;
+        document.getElementById('destination-folder').value = result.folder;
+        if (currentDocType) {
+            // Actualizar la carpeta del tipo en la BD
+            await window.electronAPI.updateDocType(currentDocType.id, { ...currentDocType, folder: result.folder });
+            currentDocType.folder = result.folder;
+        }
+        if (!foldersLocked) toggleLock('single');
     }
 }
 
-/**
- * Actualiza el contador de archivos procesados en la UI.
- */
-function updateFileCounter() {
-    document.getElementById('file-counter').textContent = `${fileCounter} archivo${fileCounter !== 1 ? 's' : ''}`;
+function toggleLock(type) {
+    foldersLocked = !foldersLocked;
+    const btn     = document.getElementById(`lock-${type}`);
+    const browse  = document.getElementById(`browse-${type}`);
+    if (btn)    btn.textContent = foldersLocked ? '🔒' : '🔓';
+    if (browse) browse.disabled = foldersLocked;
+    if (!foldersLocked) {
+        if (lockTimeout) clearTimeout(lockTimeout);
+        lockTimeout = setTimeout(() => toggleLock(type), 5000);
+    } else {
+        if (lockTimeout) clearTimeout(lockTimeout);
+    }
 }
 
-
+function updateLockState() {
+    const btn    = document.getElementById('lock-single');
+    const browse = document.getElementById('browse-single');
+    if (btn)    btn.textContent = foldersLocked ? '🔒' : '🔓';
+    if (browse) browse.disabled = foldersLocked;
+}
 
 // =================================================================================
-// --- FUNCIONES AUXILIARES Y DE UTILIDAD ---
+// TEMA
 // =================================================================================
 
-/**
- * Cambia el tema entre claro y oscuro.
- */
 function toggleTheme() {
     const isDark = document.body.classList.toggle('dark-mode');
     document.getElementById('theme-icon').textContent = isDark ? '🌙' : '☀️';
     localStorage.setItem('theme', isDark ? 'dark' : 'light');
 }
 
-/**
- * Alterna el estado de bloqueo de las carpetas.
- */
-function toggleLock() {
-    foldersLocked = !foldersLocked;
-    updateLockState();
-    
-    if (lockTimeout) clearTimeout(lockTimeout);
-    
-    if (!foldersLocked) {
-        lockTimeout = setTimeout(() => {
-            foldersLocked = true;
-            updateLockState();
-            console.log('🔒 Carpetas bloqueadas automáticamente por inactividad.');
-        }, 5000); // 5 segundos
-    }
-}
+// =================================================================================
+// VENTANAS
+// =================================================================================
 
-/**
- * Actualiza la UI para reflejar el estado de bloqueo de carpetas.
- */
-function updateLockState() {
-    const lock = document.getElementById('lock-single');
-    const button = document.getElementById('browse-single');
-
-    const isLocked = foldersLocked;
-    if (lock) {
-        lock.textContent = isLocked ? '🔒' : '🔓';
-        lock.title = isLocked ? 'Desbloquear para editar carpetas' : 'Bloquear carpetas (se bloqueará en 5s)';
-        isLocked ? lock.classList.remove('unlocked') : lock.classList.add('unlocked');
-    }
-    if (button) button.disabled = isLocked;
-}
-
-/**
- * Abre un diálogo para seleccionar la carpeta de destino (modo simple).
- */
-async function selectDestinationFolder() {
-    await selectFolder(null);
-}
-
-/**
- * Abre un diálogo para seleccionar una carpeta de destino para un tipo específico (modo auto).
- * @param {string} type - El tipo de documento (albaranes, pedidos, duas, facturas, entradas).
- */
-async function selectFolderForType(type) {
-    await selectFolder(type);
-}
-
-/**
- * Abre un diálogo para seleccionar una carpeta de destino.
- * @param {string|null} type - El tipo de documento si es para modo auto.
- */
-async function selectFolder(type = null) {
-    if (foldersLocked) {
-        alert('🔒 Las carpetas están bloqueadas. Haz clic en el candado para desbloquear.');
-        return;
-    }
-
-    if (lockTimeout) clearTimeout(lockTimeout);
-
-    const result = await window.electronAPI.selectFolder();
-
-    // Bloquear siempre después de la selección
-    foldersLocked = true;
-    updateLockState();
-
-    if (result.success) {
-        if (type) {
-            destinationFolders[type] = result.path;
-            document.getElementById(`folder-${type}`).value = result.path;
-            localStorage.setItem(`auto-folder-${type}`, result.path);
-            console.log(`✅ Carpeta para ${type}: ${result.path}`);
-        } else {
-            destinationFolder = result.path;
-            document.getElementById('destination-folder').value = result.path;
-            localStorage.setItem(`${currentMode}-folder`, result.path);
-        }
-    }
-}
-
-/**
- * Abre un archivo usando el visor por defecto del sistema operativo.
- * @param {string} filePath - La ruta del archivo a abrir.
- */
-async function openFile(filePath) {
-    const result = await window.electronAPI.openFile(filePath);
-    if (!result.success) {
-        alert('Error al abrir el archivo: ' + result.error);
-    }
-}
-
-/**
- * Abre la ventana de búsqueda.
- */
 async function showSearchModal() {
-    try {
-        await window.electronAPI.openSearchWindow();
-    } catch (error) {
-        console.error('Error al abrir ventana de búsqueda:', error);
-        alert('Error al abrir la ventana de búsqueda');
-    }
+    try { await window.electronAPI.openSearchWindow(); } catch (e) { alert('Error al abrir búsqueda'); }
 }
 
-/**
- * Abre la ventana de configuración.
- */
 async function showSettingsModal() {
-    try {
-        await window.electronAPI.openSettingsWindow();
-    } catch (error) {
-        console.error('Error al abrir ventana de configuración:', error);
-        alert('Error al abrir la ventana de configuración');
-    }
+    try { await window.electronAPI.openSettingsWindow(); } catch (e) { alert('Error al abrir configuración'); }
 }
-

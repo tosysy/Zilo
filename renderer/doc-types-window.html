@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Tipos de Documento — Zilo</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #f0f2f5; color: #2c3e50;
+            height: 100vh; display: flex; flex-direction: column; overflow: hidden;
+        }
+        body.dark-mode { background: #1a1a1a; color: #e0e0e0; }
+
+        .header {
+            background: linear-gradient(135deg, #3b4245, #7d8282);
+            color: white; padding: 14px 22px;
+            display: flex; align-items: center; gap: 12px; flex-shrink: 0;
+        }
+        .header h1 { font-size: 1rem; font-weight: 700; }
+        .header .sub { font-size: .78rem; opacity: .75; margin-top: 2px; }
+
+        .main { display: flex; flex: 1; overflow: hidden; gap: 0; }
+
+        /* ── Panel izquierdo: lista de tipos ── */
+        .list-panel {
+            width: 280px; flex-shrink: 0; background: white;
+            border-right: 1px solid #e0e0e0;
+            display: flex; flex-direction: column; overflow: hidden;
+        }
+        body.dark-mode .list-panel { background: #2d2d2d; border-color: #3a3a3a; }
+
+        .list-toolbar {
+            padding: 12px 14px; border-bottom: 1px solid #eee;
+            display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+        }
+        body.dark-mode .list-toolbar { border-color: #3a3a3a; }
+        .list-toolbar span { font-size: .82rem; font-weight: 700; color: #555; flex: 1; }
+        body.dark-mode .list-toolbar span { color: #aaa; }
+
+        .types-list { flex: 1; overflow-y: auto; padding: 8px; }
+
+        .type-item {
+            display: flex; align-items: center; gap: 10px;
+            padding: 10px 12px; border-radius: 8px; cursor: pointer;
+            transition: background .15s; margin-bottom: 4px;
+            border: 2px solid transparent;
+        }
+        .type-item:hover { background: #f0f2f5; }
+        .type-item.active { background: #f0f2f5; border-color: #3b4245; }
+        body.dark-mode .type-item:hover  { background: #252525; }
+        body.dark-mode .type-item.active { background: #252525; border-color: #7d8282; }
+
+        .type-icon { font-size: 1.4rem; flex-shrink: 0; }
+        .type-name { font-size: .88rem; font-weight: 600; }
+        .type-folder { font-size: .72rem; color: #888; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+        .empty-list { padding: 30px 14px; text-align: center; color: #aaa; font-size: .85rem; }
+
+        /* ── Panel derecho: formulario ── */
+        .form-panel {
+            flex: 1; overflow-y: auto; background: white; padding: 24px 28px;
+        }
+        body.dark-mode .form-panel { background: #232323; }
+
+        .form-title { font-size: 1.05rem; font-weight: 700; margin-bottom: 20px; display: flex; align-items: center; gap: 10px; }
+
+        .field-group { margin-bottom: 16px; }
+        .field-group label { display: block; font-size: .82rem; font-weight: 600; color: #555; margin-bottom: 5px; }
+        body.dark-mode .field-group label { color: #bbb; }
+
+        .field-group input, .field-group select {
+            width: 100%; padding: 9px 12px; border: 2px solid #ddd; border-radius: 8px;
+            font-size: .9rem; background: white; color: #2c3e50; transition: border-color .2s;
+        }
+        body.dark-mode .field-group input,
+        body.dark-mode .field-group select { background: #1a1a1a; border-color: #444; color: #e0e0e0; }
+        .field-group input:focus, .field-group select:focus { outline: none; border-color: #3b4245; }
+
+        .folder-row { display: flex; gap: 8px; }
+        .folder-row input { flex: 1; }
+
+        .icon-picker { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+        .icon-opt {
+            width: 36px; height: 36px; display: flex; align-items: center; justify-content: center;
+            font-size: 1.3rem; border-radius: 8px; cursor: pointer;
+            border: 2px solid transparent; transition: all .15s; background: #f8f9fa;
+        }
+        .icon-opt:hover { background: #e0e0e0; }
+        .icon-opt.selected { border-color: #3b4245; background: #e8eaeb; }
+        body.dark-mode .icon-opt { background: #1a1a1a; }
+        body.dark-mode .icon-opt:hover { background: #2a2a2a; }
+        body.dark-mode .icon-opt.selected { border-color: #7d8282; background: #2a2a2a; }
+
+        .hint { font-size: .77rem; color: #888; margin-top: 5px; line-height: 1.5; }
+
+        .btn {
+            padding: 9px 18px; border: none; border-radius: 8px; font-size: .88rem;
+            font-weight: 600; cursor: pointer; transition: all .15s;
+        }
+        .btn-primary { background: #3b4245; color: white; }
+        .btn-primary:hover { background: #2d3537; }
+        .btn-secondary { background: #e5e7eb; color: #374151; padding: 9px 12px; }
+        .btn-secondary:hover { background: #d1d5db; }
+        .btn-danger { background: #fee2e2; color: #dc2626; }
+        .btn-danger:hover { background: #fca5a5; }
+        .btn-new { background: #3b4245; color: white; padding: 6px 12px; font-size: .8rem; border-radius: 6px; border: none; cursor: pointer; }
+        .btn-new:hover { background: #2d3537; }
+
+        .form-actions { display: flex; gap: 10px; margin-top: 24px; padding-top: 16px; border-top: 1px solid #eee; }
+        body.dark-mode .form-actions { border-color: #3a3a3a; }
+
+        .no-selection {
+            flex: 1; display: flex; flex-direction: column; align-items: center;
+            justify-content: center; color: #aaa; gap: 14px; font-size: .9rem;
+        }
+        .no-selection .icon { font-size: 3rem; }
+
+        .section-label {
+            font-size: .75rem; font-weight: 700; text-transform: uppercase;
+            letter-spacing: .06em; color: #888; margin: 0 0 10px;
+        }
+        .link-badge {
+            display: inline-flex; align-items: center; gap: 5px;
+            background: #e3f2fd; color: #1565c0; border: 1px solid #bbdefb;
+            border-radius: 12px; padding: 3px 10px; font-size: .78rem; font-weight: 600;
+        }
+
+        /* ── Multi-plantilla ── */
+        .tpl-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+        .tpl-chip {
+            display: inline-flex; align-items: center; gap: 6px;
+            background: #e8f4e8; color: #1a6b1a; border: 1px solid #b6d9b6;
+            border-radius: 20px; padding: 4px 10px 4px 12px; font-size: .8rem; font-weight: 600;
+        }
+        body.dark-mode .tpl-chip { background: #1a3d1a; color: #7ec87e; border-color: #3a6d3a; }
+        .tpl-chip-remove {
+            width: 18px; height: 18px; border-radius: 50%; border: none; cursor: pointer;
+            background: #c8e6c8; color: #1a6b1a; font-size: .75rem; display: flex;
+            align-items: center; justify-content: center; line-height: 1; flex-shrink: 0;
+            transition: background .15s;
+        }
+        .tpl-chip-remove:hover { background: #f8b4b4; color: #dc2626; }
+        body.dark-mode .tpl-chip-remove { background: #2a5d2a; color: #7ec87e; }
+        .tpl-add-row { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+        .tpl-add-row select { flex: 1; }
+        .tpl-empty { font-size: .8rem; color: #999; padding: 6px 0; }
+    </style>
+</head>
+<body>
+<div class="header">
+    <span style="font-size:1.4rem">🗂️</span>
+    <div>
+        <h1>Tipos de Documento</h1>
+        <div class="sub">Define las categorías que Zilo aprenderá a reconocer automáticamente</div>
+    </div>
+</div>
+
+<div class="main">
+    <!-- Lista de tipos -->
+    <div class="list-panel">
+        <div class="list-toolbar">
+            <span>Mis tipos</span>
+            <button class="btn-new" id="btn-new">+ Nuevo</button>
+        </div>
+        <div class="types-list" id="types-list">
+            <div class="empty-list">Sin tipos. Crea el primero →</div>
+        </div>
+    </div>
+
+    <!-- Formulario -->
+    <div class="form-panel" id="form-panel">
+        <div class="no-selection" id="no-selection">
+            <div class="icon">🗂️</div>
+            <div>Selecciona un tipo o crea uno nuevo</div>
+            <button class="btn btn-primary" id="btn-new-2">+ Crear primer tipo</button>
+        </div>
+
+        <div id="form-fields" style="display:none">
+            <div class="form-title" id="form-title">✏️ Nuevo tipo</div>
+
+            <p class="section-label">Información básica</p>
+
+            <div class="field-group">
+                <label>Nombre del tipo <span style="color:#e74c3c">*</span></label>
+                <input type="text" id="inp-name" placeholder="Ej: Presupuestos, Contratos, Nóminas…" maxlength="40">
+            </div>
+
+            <div class="field-group">
+                <label>Icono</label>
+                <div class="icon-picker" id="icon-picker">
+                    <!-- generado por JS -->
+                </div>
+                <input type="hidden" id="inp-icon" value="📄">
+            </div>
+
+            <div class="field-group">
+                <label>Carpeta destino</label>
+                <div class="folder-row">
+                    <input type="text" id="inp-folder" placeholder="Sin configurar (se pedirá al renombrar)" readonly>
+                    <button class="btn btn-secondary" id="btn-browse-folder">📂</button>
+                    <button class="btn btn-secondary" id="btn-clear-folder" title="Limpiar">✕</button>
+                </div>
+                <p class="hint">Los archivos de este tipo se moverán automáticamente a esta carpeta.</p>
+            </div>
+
+            <hr style="border:none;border-top:1px solid #eee;margin:18px 0">
+            <p class="section-label">Aprendizaje OCR Zonal</p>
+
+            <div class="field-group">
+                <label>Plantillas OCR vinculadas</label>
+                <!-- Chips de plantillas ya vinculadas -->
+                <div class="tpl-chips" id="tpl-chips"></div>
+                <!-- Selector para añadir -->
+                <div class="tpl-add-row">
+                    <select id="inp-ocr-template">
+                        <option value="">— Añadir plantilla… —</option>
+                    </select>
+                    <button class="btn btn-secondary" id="btn-add-tpl" type="button">+ Añadir</button>
+                </div>
+                <p class="hint">Puedes vincular <strong>varias plantillas</strong> al mismo tipo para cubrir diferentes proveedores o formatos. Zilo probará todas y usará la que mejor encaje con cada documento.</p>
+            </div>
+
+            <div class="form-actions">
+                <button class="btn btn-primary" id="btn-save-type">💾 Guardar</button>
+                <button class="btn btn-danger" id="btn-delete-type" style="display:none">🗑️ Eliminar tipo</button>
+                <button class="btn btn-secondary" id="btn-cancel-type" style="margin-left:auto">Cancelar</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+const ICONS = ['📄','📋','📦','🧾','📥','📤','🗂️','📊','📁','🔖','📝','💼','🏷️','📌','🔍','⚡','💡','🎯','🏢','🔑'];
+
+let types     = [];    // array de tipos de documento
+let templates = [];    // array de plantillas OCR { id, nombre, ... }
+let editingId = null;
+let linkedIds = [];    // IDs de plantillas vinculadas al tipo en edición
+
+window.addEventListener('DOMContentLoaded', async () => {
+    const saved = localStorage.getItem('theme');
+    if (saved === 'dark') document.body.classList.add('dark-mode');
+    window.docTypesAPI.onThemeChanged(t => document.body.classList.toggle('dark-mode', t === 'dark'));
+
+    buildIconPicker();
+    await loadData();
+
+    document.getElementById('btn-new').addEventListener('click',         () => openForm(null));
+    document.getElementById('btn-new-2').addEventListener('click',       () => openForm(null));
+    document.getElementById('btn-save-type').addEventListener('click',   saveType);
+    document.getElementById('btn-delete-type').addEventListener('click', deleteType);
+    document.getElementById('btn-cancel-type').addEventListener('click', cancelForm);
+    document.getElementById('btn-browse-folder').addEventListener('click', browseFolder);
+    document.getElementById('btn-clear-folder').addEventListener('click', () => {
+        document.getElementById('inp-folder').value = '';
+    });
+    document.getElementById('btn-add-tpl').addEventListener('click', addLinkedTemplate);
+});
+
+// ── Icono picker ──────────────────────────────────────────────────────────────
+function buildIconPicker() {
+    const picker = document.getElementById('icon-picker');
+    ICONS.forEach(ic => {
+        const div = document.createElement('div');
+        div.className   = 'icon-opt';
+        div.textContent = ic;
+        div.addEventListener('click', () => selectIcon(ic));
+        picker.appendChild(div);
+    });
+}
+
+function selectIcon(ic) {
+    document.getElementById('inp-icon').value = ic;
+    document.querySelectorAll('.icon-opt').forEach(el => {
+        el.classList.toggle('selected', el.textContent === ic);
+    });
+}
+
+// ── Carga de datos ────────────────────────────────────────────────────────────
+async function loadData() {
+    [types, templates] = await Promise.all([
+        window.docTypesAPI.getAll(),
+        window.docTypesAPI.getAllTemplates()
+    ]);
+    renderTypesList();
+    refreshTemplateSelect();
+}
+
+// ── Lista de tipos ────────────────────────────────────────────────────────────
+function renderTypesList() {
+    const list = document.getElementById('types-list');
+    if (!types.length) {
+        list.innerHTML = '<div class="empty-list">Sin tipos definidos.<br>Pulsa "+ Nuevo" para crear el primero.</div>';
+        return;
+    }
+    list.innerHTML = types.map(t => {
+        const ids  = Array.isArray(t.ocr_template_ids) ? t.ocr_template_ids : [];
+        const sub  = ids.length ? `${ids.length} plantilla${ids.length > 1 ? 's' : ''} OCR` : (t.folder || 'Sin carpeta destino');
+        return `
+        <div class="type-item ${editingId === t.id ? 'active' : ''}" onclick="openForm(${t.id})">
+            <div class="type-icon">${t.icon}</div>
+            <div style="overflow:hidden">
+                <div class="type-name">${esc(t.name)}</div>
+                <div class="type-folder">${esc(sub)}</div>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+// ── Selector "añadir plantilla" (solo muestra las NO vinculadas aún) ──────────
+function refreshTemplateSelect() {
+    const sel = document.getElementById('inp-ocr-template');
+    sel.innerHTML = '<option value="">— Añadir plantilla… —</option>';
+    templates.forEach(tpl => {
+        if (linkedIds.includes(tpl.id)) return; // ya vinculada → no mostrar
+        const opt = document.createElement('option');
+        opt.value       = tpl.id;
+        opt.textContent = tpl.nombre;
+        sel.appendChild(opt);
+    });
+}
+
+// ── Chips de plantillas vinculadas ────────────────────────────────────────────
+function renderLinkedChips() {
+    const container = document.getElementById('tpl-chips');
+    if (!linkedIds.length) {
+        container.innerHTML = '<span class="tpl-empty">Sin plantillas vinculadas — solo renombrado manual</span>';
+        refreshTemplateSelect();
+        return;
+    }
+    container.innerHTML = linkedIds.map(id => {
+        const tpl = templates.find(t => t.id === id);
+        if (!tpl) return '';
+        return `<div class="tpl-chip">
+            🎯 ${esc(tpl.nombre)}
+            <button class="tpl-chip-remove" onclick="removeLinkedTemplate('${id}')" title="Desvincular">✕</button>
+        </div>`;
+    }).join('');
+    refreshTemplateSelect();
+}
+
+function addLinkedTemplate() {
+    const sel = document.getElementById('inp-ocr-template');
+    const id  = sel.value;
+    if (!id || linkedIds.includes(id)) return;
+    linkedIds.push(id);
+    renderLinkedChips();
+    sel.value = '';
+}
+
+function removeLinkedTemplate(id) {
+    linkedIds = linkedIds.filter(x => x !== id);
+    renderLinkedChips();
+}
+
+// ── Formulario ────────────────────────────────────────────────────────────────
+function openForm(id) {
+    editingId = id;
+    document.getElementById('no-selection').style.display = 'none';
+    document.getElementById('form-fields').style.display  = 'block';
+
+    if (id === null) {
+        document.getElementById('form-title').textContent  = '✏️ Nuevo tipo de documento';
+        document.getElementById('inp-name').value          = '';
+        document.getElementById('inp-folder').value        = '';
+        document.getElementById('btn-delete-type').style.display = 'none';
+        selectIcon('📄');
+        linkedIds = [];
+    } else {
+        const t = types.find(x => x.id === id);
+        if (!t) return;
+        document.getElementById('form-title').textContent  = `✏️ Editar — ${esc(t.name)}`;
+        document.getElementById('inp-name').value          = t.name;
+        document.getElementById('inp-folder').value        = t.folder || '';
+        document.getElementById('btn-delete-type').style.display = 'inline-flex';
+        selectIcon(t.icon || '📄');
+        // Cargar plantillas vinculadas (nuevo campo o migrar del antiguo)
+        if (Array.isArray(t.ocr_template_ids) && t.ocr_template_ids.length) {
+            linkedIds = [...t.ocr_template_ids];
+        } else if (t.ocr_template_id) {
+            linkedIds = [t.ocr_template_id];
+        } else {
+            linkedIds = [];
+        }
+    }
+
+    renderLinkedChips();
+    renderTypesList();
+    document.getElementById('inp-name').focus();
+}
+
+// ── Guardar ───────────────────────────────────────────────────────────────────
+async function saveType() {
+    const name   = document.getElementById('inp-name').value.trim();
+    const icon   = document.getElementById('inp-icon').value || '📄';
+    const folder = document.getElementById('inp-folder').value.trim();
+
+    if (!name) { document.getElementById('inp-name').focus(); return; }
+
+    const data = {
+        name,
+        icon,
+        folder:           folder || null,
+        ocr_template_ids: linkedIds
+    };
+
+    let result;
+    if (editingId === null) {
+        result = await window.docTypesAPI.create(data);
+    } else {
+        result = await window.docTypesAPI.update(editingId, data);
+    }
+
+    if (result.success) {
+        editingId = result.id ?? editingId;
+        await loadData();
+        openForm(editingId);
+    } else {
+        alert('Error al guardar: ' + result.error);
+    }
+}
+
+// ── Eliminar ──────────────────────────────────────────────────────────────────
+async function deleteType() {
+    if (editingId === null) return;
+    const t = types.find(x => x.id === editingId);
+    if (!confirm(`¿Eliminar el tipo "${t?.name}"?`)) return;
+    await window.docTypesAPI.remove(editingId);
+    editingId = null;
+    linkedIds = [];
+    await loadData();
+    document.getElementById('form-fields').style.display  = 'none';
+    document.getElementById('no-selection').style.display = 'flex';
+}
+
+// ── Cancelar ──────────────────────────────────────────────────────────────────
+function cancelForm() {
+    editingId = null;
+    linkedIds = [];
+    document.getElementById('form-fields').style.display  = 'none';
+    document.getElementById('no-selection').style.display = 'flex';
+    renderTypesList();
+}
+
+// ── Carpeta ───────────────────────────────────────────────────────────────────
+async function browseFolder() {
+    const result = await window.docTypesAPI.selectFolder();
+    if (result.success && result.folder) {
+        document.getElementById('inp-folder').value = result.folder;
+    }
+}
+
+function esc(s) {
+    return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+</script>
+</body>
+</html>

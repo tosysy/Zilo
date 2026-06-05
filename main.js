@@ -2,6 +2,21 @@ const { app, BrowserWindow, ipcMain, dialog, shell, screen } = require('electron
 const path = require('path');
 const fs = require('fs').promises;
 
+// ── Módulos de licencia, OCR Zonal y BD ──────────────────────────────────────
+const { LicenseManager, ROLES } = require('./license-manager');
+const { OcrZonalEngine }        = require('./ocr-zonal-engine');
+const { MLEngine }              = require('./ml-engine');
+const ZiloDatabase              = require('./db');
+
+let licenseManager   = null;
+let ocrZonalEngine   = null;
+let mlEngine         = null;
+let ziloDb           = null;
+let licenseWindow    = null;
+let adminPanelWindow = null;
+let ocrZonalWindow   = null;
+let docTypesWindow   = null;
+
 let mainWindow;
 let searchWindow = null;
 let settingsWindow = null;
@@ -84,6 +99,136 @@ function stopWatchFolder() {
   watchedFiles.clear();
 }
 
+// ─── Ventana de activación de licencia ───────────────────────────────────────
+function openLicenseWindow() {
+  return new Promise((resolve) => {
+    const { width, height } = screen.getPrimaryDisplay().workAreaSize;
+    const x = Math.round((width  / 2) - (900 / 2));
+    const y = Math.round((height / 2) - (660 / 2));
+
+    licenseWindow = new BrowserWindow({
+      width: 900, height: 660, x, y,
+      resizable: false, maximizable: false, fullscreenable: false, minimizable: false,
+      closable: false,
+      webPreferences: {
+        preload: path.join(__dirname, 'license-preload.js'),
+        nodeIntegration: false, contextIsolation: true, sandbox: false
+      },
+      icon: path.join(__dirname, 'build/icon.png'),
+      title: 'Activar Zilo', autoHideMenuBar: true
+    });
+
+    licenseWindow.loadFile(path.join(__dirname, 'renderer/license-window.html'));
+
+    // Cerramos la ventana cuando la licencia quede activa (el renderer recarga)
+    licenseWindow.webContents.on('did-finish-load', () => {
+      const status = licenseManager.getStatus();
+      if (status.activated && licenseWindow && !licenseWindow.isDestroyed()) {
+        licenseWindow.closable = true;
+        licenseWindow.close();
+      }
+    });
+
+    licenseWindow.on('closed', () => { licenseWindow = null; resolve(); });
+  });
+}
+
+// ─── Panel de administración ──────────────────────────────────────────────────
+function openAdminPanel() {
+  return new Promise((resolve) => {
+    if (adminPanelWindow && !adminPanelWindow.isDestroyed()) {
+      adminPanelWindow.focus(); return resolve({ success: true });
+    }
+    const { width, height } = screen.getPrimaryDisplay().workAreaSize;
+    const x = Math.round((width  / 2) - (900 / 2));
+    const y = Math.round((height / 2) - (620 / 2));
+
+    adminPanelWindow = new BrowserWindow({
+      width: 900, height: 620, x, y,
+      parent: mainWindow, resizable: true, maximizable: true, fullscreenable: false,
+      webPreferences: {
+        preload: path.join(__dirname, 'admin-panel-preload.js'),
+        nodeIntegration: false, contextIsolation: true, sandbox: false
+      },
+      icon: path.join(__dirname, 'build/icon.png'),
+      title: 'Panel de Administración — Zilo', autoHideMenuBar: true
+    });
+
+    adminPanelWindow.loadFile(path.join(__dirname, 'renderer/admin-panel-window.html'));
+    mainWindow.webContents.executeJavaScript('localStorage.getItem("theme")').then(theme => {
+      if (adminPanelWindow && !adminPanelWindow.isDestroyed())
+        adminPanelWindow.webContents.send('theme-changed', theme || 'light');
+    });
+    adminPanelWindow.on('closed', () => { adminPanelWindow = null; resolve({ success: true }); });
+  });
+}
+
+// ─── Ventana OCR Zonal ────────────────────────────────────────────────────────
+function openOcrZonalWindow() {
+  return new Promise((resolve) => {
+    if (ocrZonalWindow && !ocrZonalWindow.isDestroyed()) {
+      ocrZonalWindow.focus(); return resolve({ success: true });
+    }
+    const { width, height } = screen.getPrimaryDisplay().workAreaSize;
+    const x = Math.round((width  / 2) - (1200 / 2));
+    const y = Math.round((height / 2) - (760 / 2));
+
+    ocrZonalWindow = new BrowserWindow({
+      width: 1200, height: 760, x, y,
+      parent: mainWindow, modal: true,
+      resizable: true, maximizable: true, fullscreenable: true,
+      webPreferences: {
+        preload: path.join(__dirname, 'ocr-zonal-preload.js'),
+        nodeIntegration: false, contextIsolation: true, sandbox: false
+      },
+      icon: path.join(__dirname, 'build/icon.png'),
+      title: 'Motor OCR Zonal — Zilo', autoHideMenuBar: true
+    });
+
+    ocrZonalWindow.loadFile(path.join(__dirname, 'renderer/ocr-zonal-window.html'));
+    mainWindow.webContents.executeJavaScript('localStorage.getItem("theme")').then(theme => {
+      if (ocrZonalWindow && !ocrZonalWindow.isDestroyed())
+        ocrZonalWindow.webContents.send('theme-changed', theme || 'light');
+    });
+    ocrZonalWindow.on('closed', () => { ocrZonalWindow = null; resolve({ success: true }); });
+  });
+}
+
+// ─── Ventana de Tipos de Documento ───────────────────────────────────────────
+function openDocTypesWindow() {
+  return new Promise((resolve) => {
+    if (docTypesWindow && !docTypesWindow.isDestroyed()) {
+      docTypesWindow.focus(); return resolve({ success: true });
+    }
+    const { width, height } = screen.getPrimaryDisplay().workAreaSize;
+    const x = Math.round((width  / 2) - (860 / 2));
+    const y = Math.round((height / 2) - (600 / 2));
+
+    docTypesWindow = new BrowserWindow({
+      width: 860, height: 600, x, y,
+      parent: mainWindow, resizable: true, maximizable: true,
+      webPreferences: {
+        preload: path.join(__dirname, 'doc-types-preload.js'),
+        nodeIntegration: false, contextIsolation: true, sandbox: false
+      },
+      icon: path.join(__dirname, 'build/icon.png'),
+      title: 'Tipos de Documento — Zilo', autoHideMenuBar: true
+    });
+    docTypesWindow.loadFile(path.join(__dirname, 'renderer/doc-types-window.html'));
+    mainWindow.webContents.executeJavaScript('localStorage.getItem("theme")').then(theme => {
+      if (docTypesWindow && !docTypesWindow.isDestroyed())
+        docTypesWindow.webContents.send('theme-changed', theme || 'light');
+    });
+    docTypesWindow.on('closed', () => {
+      docTypesWindow = null;
+      // Notificar a la app principal para que recargue los tipos
+      if (mainWindow && !mainWindow.isDestroyed())
+        mainWindow.webContents.send('doc-types-updated');
+      resolve({ success: true });
+    });
+  });
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 900,
@@ -101,7 +246,7 @@ function createWindow() {
     icon: path.join(__dirname, 'build/icon.png'),
     title: 'Procesador PDFs',
     autoHideMenuBar: true,
-    backgroundColor: '#6b9ac4',
+    backgroundColor: '#f0f2f5',
     show: false // Ocultar la ventana principal al inicio
   });
 
@@ -185,10 +330,6 @@ function openSettingsWindowFirstTime() {
     });
 
     settingsWindow.loadFile(path.join(__dirname, 'renderer/settings-window.html'));
-    
-    settingsWindow.webContents.once('did-finish-load', () => {
-        settingsWindow.webContents.send('first-time-setup');
-    });
 
     settingsWindow.on('closed', () => {
       settingsWindow = null;
@@ -198,11 +339,34 @@ function openSettingsWindowFirstTime() {
 }
 
 app.whenReady().then(() => {
+  // ── Inicializar módulos ────────────────────────────────────────────────────
+  licenseManager = new LicenseManager(app);
+  licenseManager.initialize();
+
+  // Inicializar DB primero — los motores dependen de ella
+  ziloDb = new ZiloDatabase(app);
+  ziloDb.initialize();
+
+  ocrZonalEngine = new OcrZonalEngine(ziloDb);
+  mlEngine       = new MLEngine(ziloDb);
+
   createWindow();
 
   // Cargar la ruta personalizada del índice OCR cuando la ventana esté lista
   mainWindow.webContents.once('did-finish-load', async () => {
     try {
+      // ── Comprobar licencia activa ────────────────────────────────────────
+      const licStatus = licenseManager.getStatus();
+      if (!licStatus.activated) {
+        await openLicenseWindow();
+        // Comprobar de nuevo tras activación
+        const afterActivation = licenseManager.getStatus();
+        if (!afterActivation.activated) {
+          app.quit();
+          return;
+        }
+      }
+
       // Verificar si es la primera vez que se abre la aplicación
       const firstTimeSetup = await mainWindow.webContents.executeJavaScript('localStorage.getItem("first-time-setup")');
 
@@ -389,7 +553,7 @@ ipcMain.handle('move-file', async (event, originalPath, destFolder, newName, cre
 ipcMain.handle('rename-file', async (event, originalPath, newName) => {
   try {
     const directory = path.dirname(originalPath);
-    const newPath = path.join(directory, newName);
+    let newPath = path.join(directory, newName);
     
     // Verificar si el archivo destino ya existe
     try {
@@ -670,15 +834,8 @@ ipcMain.handle('open-settings-window', async (event) => {
       backgroundColor: '#fcfcfc'
     });
 
-ipcMain.on('close-settings-window', () => {
-      if (settingsWindow && !settingsWindow.isDestroyed()) {
-        settingsWindow.destroy();
-      }
-    });
-
     settingsWindow.loadFile(path.join(__dirname, 'renderer/settings-window.html'));
 
-    // Bloquear atajos de teclado no deseados
     settingsWindow.webContents.on('before-input-event', (event, input) => {
       if (input.control || input.meta) {
         if (input.key.toLowerCase() === 'r') {
@@ -742,79 +899,49 @@ ipcMain.on('close-settings-window', () => {
   }
 });
 
+// Cerrar ventana de configuración (funciona tanto en primer arranque como normal)
+ipcMain.on('close-settings-window', () => {
+  if (settingsWindow && !settingsWindow.isDestroyed()) {
+    settingsWindow.closable = true;
+    settingsWindow.destroy();
+  }
+});
+
 // Recibir configuración guardada desde la ventana de configuración
 ipcMain.on('settings-saved', (event, settings) => {
-  console.log('[CONFIG] Configuracion recibida desde ventana de configuracion:', settings);
+  console.log('[CONFIG] Configuracion recibida:', settings);
 
-  // Si es la primera vez, marcar como completado y mostrar ventana principal
-  if (settings.isFirstTime) {
-    mainWindow.webContents.executeJavaScript('localStorage.setItem("first-time-setup", "true");');
-    if (mainWindow && !mainWindow.isVisible()) {
-      mainWindow.show();
-    }
-    if (settingsWindow && !settingsWindow.isDestroyed()) {
-      settingsWindow.destroy();
-    }
-  }
-
-  // Actualizar la ruta personalizada del índice OCR en la variable global
+  // Actualizar ruta del índice OCR
   if (settings.ocrIndexPath && settings.ocrIndexPath.trim() !== '') {
     customOCRIndexPath = settings.ocrIndexPath;
-    console.log('[CONFIG] Ruta personalizada del indice OCR actualizada:', customOCRIndexPath);
   } else {
     customOCRIndexPath = null;
-    console.log('[CONFIG] Usando ruta por defecto del indice OCR');
   }
 
-  // Guardar la configuración en la ventana principal
+  // Iniciar / detener vigilancia de carpeta
+  if (settings.watchFolder && settings.watchFolder.trim() !== '') {
+    startWatchFolder(settings.watchFolder);
+  } else {
+    stopWatchFolder();
+  }
+
+  // Persistir todo en localStorage de la ventana principal
   if (mainWindow && !mainWindow.isDestroyed()) {
-    const foldersJS = settings.folders ? `
-      localStorage.setItem('auto-folder-albaranes', ${JSON.stringify(settings.folders.albaranes || '')});
-      localStorage.setItem('auto-folder-pedidos', ${JSON.stringify(settings.folders.pedidos || '')});
-      localStorage.setItem('auto-folder-duas', ${JSON.stringify(settings.folders.duas || '')});
-      localStorage.setItem('auto-folder-facturas', ${JSON.stringify(settings.folders.facturas || '')});
-      localStorage.setItem('auto-folder-entradas', ${JSON.stringify(settings.folders.entradas || '')});
-    ` : '';
-
-    const ocrIndexPathJS = settings.ocrIndexPath !== undefined ? `
-      localStorage.setItem('ocr-index-path', ${JSON.stringify(settings.ocrIndexPath || '')});
-    ` : '';
-
-    const maxPagesJS = settings.maxPages !== undefined ? `
-      localStorage.setItem('max-pages-ocr', '${settings.maxPages}');
-      if (typeof maxPagesToProcess !== 'undefined') {
-        maxPagesToProcess = ${settings.maxPages};
-      }
-    ` : '';
-
-    const watchFolderJS = settings.watchFolder !== undefined ? `
-      localStorage.setItem('watch-folder', ${JSON.stringify(settings.watchFolder || '')});
-    ` : '';
-
-    const watchErrorFolderJS = settings.watchErrorFolder !== undefined ? `
-      localStorage.setItem('watch-error-folder', ${JSON.stringify(settings.watchErrorFolder || '')});
-    ` : '';
-
-    // Iniciar o detener vigilancia de carpeta
-    if (settings.watchFolder !== undefined) {
-      if (settings.watchFolder && settings.watchFolder.trim() !== '') {
-        startWatchFolder(settings.watchFolder);
-      } else {
-        stopWatchFolder();
-      }
-    }
-
     mainWindow.webContents.executeJavaScript(`
-      localStorage.setItem('concurrentLimit', '${settings.concurrentLimit}');
-      if (typeof concurrentLimit !== 'undefined') {
-        concurrentLimit = ${settings.concurrentLimit};
-      }
-      ${foldersJS}
-      ${ocrIndexPathJS}
-      ${maxPagesJS}
-      ${watchFolderJS}
-      ${watchErrorFolderJS}
+      localStorage.setItem('concurrentLimit', '${settings.concurrentLimit || 50}');
+      if (typeof concurrentLimit !== 'undefined') concurrentLimit = ${settings.concurrentLimit || 50};
+      localStorage.setItem('ocr-index-path', ${JSON.stringify(settings.ocrIndexPath || '')});
+      localStorage.setItem('max-pages-ocr', '${settings.maxPages ?? 0}');
+      if (typeof maxPagesToProcess !== 'undefined') maxPagesToProcess = ${settings.maxPages ?? 0};
+      localStorage.setItem('watch-folder', ${JSON.stringify(settings.watchFolder || '')});
+      localStorage.setItem('watch-error-folder', ${JSON.stringify(settings.watchErrorFolder || '')});
+      localStorage.setItem('first-time-setup', 'true');
     `);
+
+    // Si la ventana principal estaba oculta (primer arranque), mostrarla ahora
+    if (!mainWindow.isVisible()) {
+      mainWindow.show();
+    }
   }
 });
 
@@ -962,4 +1089,187 @@ ipcMain.on('manual-rename-skipped', (event) => {
     manualRenameWindow.forceClose = true;
     manualRenameWindow.close();
   }
+});
+
+// =============================================================================
+// ── IPC: SISTEMA DE LICENCIAS ─────────────────────────────────────────────────
+// =============================================================================
+
+ipcMain.handle('license-activate', async (event, key) => {
+  return licenseManager.activate(key);
+});
+
+ipcMain.handle('license-get-status', async () => {
+  return licenseManager.getStatus();
+});
+
+ipcMain.handle('license-get-machine-id', async () => {
+  return licenseManager.getMachineId();
+});
+
+ipcMain.handle('license-get-devices', async (event, licenseKey) => {
+  const status = licenseManager.getStatus();
+  if (status.role !== ROLES.ADMIN) return [];
+  return licenseManager.getDevices(licenseKey);
+});
+
+ipcMain.handle('license-revoke-device', async (event, targetMachineId) => {
+  const myId = licenseManager.getMachineId();
+  return licenseManager.revokeDevice(myId, targetMachineId);
+});
+
+ipcMain.handle('license-transfer-admin', async (event, targetMachineId) => {
+  const myId = licenseManager.getMachineId();
+  return licenseManager.transferAdmin(myId, targetMachineId);
+});
+
+ipcMain.handle('open-admin-panel', async () => {
+  const status = licenseManager.getStatus();
+  if (status.role !== ROLES.ADMIN) return { success: false, error: 'Acceso denegado. Solo el administrador puede abrir este panel.' };
+  return openAdminPanel();
+});
+
+// =============================================================================
+// ── IPC: MOTOR OCR ZONAL (visual, basado en zonas) ───────────────────────────
+// =============================================================================
+
+ipcMain.handle('ocr-zonal-get-templates', async () => {
+  return ocrZonalEngine.getAllTemplates();
+});
+
+ipcMain.handle('ocr-zonal-save-template', async (event, data) => {
+  return ocrZonalEngine.saveTemplate(data);
+});
+
+ipcMain.handle('ocr-zonal-delete-template', async (event, id) => {
+  return ocrZonalEngine.deleteTemplate(id);
+});
+
+ipcMain.handle('ocr-increment-confirmations', async (event, id) => {
+  return ocrZonalEngine.incrementConfirmations(id);
+});
+
+ipcMain.handle('ocr-get-pending-patterns', async () => {
+  return ocrZonalEngine.getPendingPatterns();
+});
+
+ipcMain.handle('ocr-add-pending-pattern', async (event, data) => {
+  return ocrZonalEngine.addPendingPattern(data);
+});
+
+ipcMain.handle('ocr-delete-pending-pattern', async (event, id) => {
+  return ocrZonalEngine.deletePendingPattern(id);
+});
+
+ipcMain.handle('ocr-promote-pending-pattern', async (event, id) => {
+  return ocrZonalEngine.promotePendingPattern(id);
+});
+
+// ── Motor ML ──────────────────────────────────────────────────────────────────
+ipcMain.handle('ml-train', async (event, { text, className }) => {
+  return mlEngine.train(text, className);
+});
+
+ipcMain.handle('ml-classify', async (event, text) => {
+  return mlEngine.classify(text);
+});
+
+ipcMain.handle('ml-get-stats', async () => {
+  return mlEngine.getStats();
+});
+
+ipcMain.handle('ml-delete-class', async (event, className) => {
+  return mlEngine.deleteClass(className);
+});
+
+ipcMain.handle('ml-reset', async () => {
+  return mlEngine.reset();
+});
+
+// Selector de PDF (para el visor OCR Zonal)
+ipcMain.handle('select-pdf-file', async () => {
+  try {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openFile'],
+      filters: [{ name: 'PDF', extensions: ['pdf'] }]
+    });
+    if (!result.canceled && result.filePaths.length > 0) {
+      return { success: true, files: result.filePaths };
+    }
+    return { success: false, cancelled: true };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+});
+
+ipcMain.handle('open-ocr-zonal-window', async () => {
+  return openOcrZonalWindow();
+});
+
+ipcMain.on('close-ocr-zonal-window', () => {
+  if (ocrZonalWindow && !ocrZonalWindow.isDestroyed()) {
+    ocrZonalWindow.close();
+  }
+});
+
+// =============================================================================
+// ── IPC: TIPOS DE DOCUMENTO ───────────────────────────────────────────────────
+// =============================================================================
+
+ipcMain.handle('doc-types-get-all', async () => {
+  try {
+    const rows = ziloDb.db.prepare('SELECT * FROM doc_types ORDER BY created_at ASC').all();
+    // Parsear ocr_template_ids (JSON) → array
+    return rows.map(r => ({
+      ...r,
+      ocr_template_ids: (() => { try { return JSON.parse(r.ocr_template_ids || '[]'); } catch { return []; } })()
+    }));
+  } catch (e) { return []; }
+});
+
+ipcMain.handle('doc-types-create', async (event, data) => {
+  try {
+    const ids     = Array.isArray(data.ocr_template_ids) ? data.ocr_template_ids : [];
+    const firstId = ids.length ? ids[0] : (data.ocr_template_id || null);
+    const stmt = ziloDb.db.prepare(`
+      INSERT INTO doc_types (name, icon, folder, ocr_template_id, ocr_template_ids)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+    const result = stmt.run(data.name, data.icon || '📄', data.folder || null, firstId, JSON.stringify(ids));
+    return { success: true, id: result.lastInsertRowid };
+  } catch (e) { return { success: false, error: e.message }; }
+});
+
+ipcMain.handle('doc-types-update', async (event, { id, data }) => {
+  try {
+    const ids     = Array.isArray(data.ocr_template_ids) ? data.ocr_template_ids : [];
+    const firstId = ids.length ? ids[0] : (data.ocr_template_id || null);
+    ziloDb.db.prepare(`
+      UPDATE doc_types SET name=?, icon=?, folder=?, ocr_template_id=?, ocr_template_ids=? WHERE id=?
+    `).run(data.name, data.icon || '📄', data.folder || null, firstId, JSON.stringify(ids), id);
+    return { success: true };
+  } catch (e) { return { success: false, error: e.message }; }
+});
+
+ipcMain.handle('doc-types-delete', async (event, id) => {
+  try {
+    ziloDb.db.prepare('DELETE FROM doc_types WHERE id=?').run(id);
+    return { success: true };
+  } catch (e) { return { success: false, error: e.message }; }
+});
+
+ipcMain.handle('open-doc-types-window', async () => {
+  return openDocTypesWindow();
+});
+
+// =============================================================================
+// ── IPC: PATRONES DE RENOMBRADO APRENDIDOS ────────────────────────────────────
+// =============================================================================
+
+ipcMain.handle('learn-rename-pattern', async (event, { typeName, ocrText, finalName }) => {
+  return ziloDb.learnRenamePattern(typeName, ocrText, finalName);
+});
+
+ipcMain.handle('get-learned-patterns', async (event, typeName) => {
+  return ziloDb.getLearnedPatterns(typeName);
 });

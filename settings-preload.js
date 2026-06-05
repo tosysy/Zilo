@@ -23,5 +23,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     selectOCRIndexLocation: () => ipcRenderer.invoke('select-ocr-index-location'),
 
     // Obtener la ruta por defecto del índice OCR
-    getDefaultOCRIndexPath: () => ipcRenderer.invoke('get-default-ocr-index-path')
+    getDefaultOCRIndexPath: () => ipcRenderer.invoke('get-default-ocr-index-path'),
+
+    // Abrir ventana de tipos de documento
+    openDocTypesWindow: () => ipcRenderer.invoke('open-doc-types-window')
 });

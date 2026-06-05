@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Panel de Administración — Zilo</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #f0f2f5; color: #2c3e50; height: 100vh; overflow: hidden;
+            display: flex; flex-direction: column;
+        }
+        body.dark-mode { background: #1a1a1a; color: #e0e0e0; }
+
+        /* Header */
+        .header {
+            background: linear-gradient(135deg, #3b4245 0%, #7d8282 100%);
+            color: white; padding: 16px 24px; display: flex; align-items: center; gap: 12px;
+            flex-shrink: 0;
+        }
+        .header h1 { font-size: 1.15rem; font-weight: 700; }
+        .header .subtitle { font-size: .8rem; opacity: .75; }
+
+        /* Stats bar */
+        .stats-bar {
+            display: flex; gap: 16px; padding: 16px 24px; background: white;
+            border-bottom: 1px solid #e0e0e0; flex-shrink: 0; flex-wrap: wrap;
+        }
+        body.dark-mode .stats-bar { background: #2d2d2d; border-color: #444; }
+        .stat-card {
+            display: flex; flex-direction: column; align-items: center; gap: 4px;
+            background: #f8f9fa; border-radius: 10px; padding: 12px 20px;
+            border: 1px solid #e0e0e0; min-width: 110px;
+        }
+        body.dark-mode .stat-card { background: #1a1a1a; border-color: #444; }
+        .stat-value { font-size: 1.6rem; font-weight: 700; color: #3b4245; }
+        body.dark-mode .stat-value { color: #e0e0e0; }
+        .stat-value.warn { color: #e67e22; }
+        .stat-value.ok   { color: #27ae60; }
+        .stat-label { font-size: .75rem; color: #7f8c8d; }
+
+        /* Content */
+        .content { flex: 1; overflow-y: auto; padding: 20px 24px; }
+
+        .section-title {
+            font-size: .95rem; font-weight: 700; color: #3b4245; margin-bottom: 12px;
+            display: flex; align-items: center; gap: 8px;
+        }
+        body.dark-mode .section-title { color: #ccc; }
+
+        /* Tabla de dispositivos */
+        .devices-table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+        .devices-table th {
+            background: #f8f9fa; padding: 10px 12px; text-align: left;
+            border-bottom: 2px solid #e0e0e0; font-weight: 600; color: #555;
+        }
+        body.dark-mode .devices-table th { background: #1a1a1a; border-color: #444; color: #aaa; }
+        .devices-table td { padding: 10px 12px; border-bottom: 1px solid #f0f0f0; vertical-align: middle; }
+        body.dark-mode .devices-table td { border-color: #333; }
+        .devices-table tr:last-child td { border-bottom: none; }
+        .devices-table tr:hover td { background: #f8f9fa; }
+        body.dark-mode .devices-table tr:hover td { background: #252525; }
+
+        .role-badge {
+            padding: 3px 10px; border-radius: 20px; font-size: .78rem; font-weight: 700;
+        }
+        .role-badge.admin    { background: #fff3cd; color: #856404; border: 1.5px solid #ffc107; }
+        .role-badge.standard { background: #e3f2fd; color: #1565c0; border: 1.5px solid #2196f3; }
+        .role-badge.me       { background: #e8f5e9; color: #2e7d32; border: 1.5px solid #4caf50; }
+
+        .btn-sm {
+            padding: 5px 12px; border-radius: 6px; border: none; cursor: pointer;
+            font-size: .8rem; font-weight: 600; transition: all .15s;
+        }
+        .btn-danger  { background: #fee2e2; color: #dc2626; }
+        .btn-danger:hover  { background: #fca5a5; }
+        .btn-primary { background: #dbeafe; color: #1d4ed8; }
+        .btn-primary:hover { background: #93c5fd; }
+        .btn-disabled { opacity: .4; cursor: not-allowed; }
+
+        /* Transfer modal */
+        .modal-overlay {
+            display: none; position: fixed; inset: 0; background: rgba(0,0,0,.5);
+            z-index: 999; align-items: center; justify-content: center;
+        }
+        .modal-overlay.open { display: flex; }
+        .modal-box {
+            background: white; border-radius: 14px; padding: 28px 32px;
+            max-width: 400px; width: 90%; box-shadow: 0 8px 32px rgba(0,0,0,.2);
+        }
+        body.dark-mode .modal-box { background: #2d2d2d; }
+        .modal-box h3 { font-size: 1.1rem; margin-bottom: 10px; }
+        .modal-box p  { font-size: .85rem; color: #666; margin-bottom: 18px; line-height: 1.5; }
+        body.dark-mode .modal-box p { color: #aaa; }
+        .modal-actions { display: flex; gap: 10px; }
+        .modal-actions button { flex: 1; padding: 10px; border-radius: 8px; border: none; cursor: pointer; font-weight: 600; font-size: .88rem; }
+        .btn-confirm-danger { background: #dc2626; color: white; }
+        .btn-confirm-transfer { background: #1d4ed8; color: white; }
+        .btn-cancel-modal { background: #e5e7eb; color: #374151; }
+
+        /* Empty state */
+        .empty-state { text-align: center; padding: 40px; color: #aaa; font-size: .9rem; }
+    </style>
+</head>
+<body>
+<div class="header">
+    <span style="font-size:1.5rem">🏢</span>
+    <div>
+        <h1>Panel de Administración</h1>
+        <div class="subtitle" id="header-subtitle">Gestión de empresa y puestos</div>
+    </div>
+</div>
+
+<div class="stats-bar">
+    <div class="stat-card">
+        <div class="stat-value" id="stat-days">—</div>
+        <div class="stat-label">Días restantes</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value" id="stat-seats-used">—</div>
+        <div class="stat-label">Puestos usados</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value" id="stat-seats-max">—</div>
+        <div class="stat-label">Puestos máximos</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value" id="stat-estado">—</div>
+        <div class="stat-label">Estado licencia</div>
+    </div>
+</div>
+
+<div class="content">
+    <div class="section-title">💻 Dispositivos registrados</div>
+    <table class="devices-table">
+        <thead>
+            <tr>
+                <th>Hostname</th>
+                <th>Rol</th>
+                <th>Registro</th>
+                <th>Acciones</th>
+            </tr>
+        </thead>
+        <tbody id="devices-tbody">
+            <tr><td colspan="4" class="empty-state">Cargando…</td></tr>
+        </tbody>
+    </table>
+</div>
+
+<!-- Modal confirmación revocar -->
+<div class="modal-overlay" id="modal-revoke">
+    <div class="modal-box">
+        <h3>🗑️ Revocar dispositivo</h3>
+        <p>¿Estás seguro de que quieres desvincular <strong id="revoke-hostname"></strong>? Tendrá que volver a activar la licencia.</p>
+        <div class="modal-actions">
+            <button class="btn-confirm-danger" id="btn-confirm-revoke">Revocar</button>
+            <button class="btn-cancel-modal" id="btn-cancel-revoke">Cancelar</button>
+        </div>
+    </div>
+</div>
+
+<!-- Modal confirmación transferir admin -->
+<div class="modal-overlay" id="modal-transfer">
+    <div class="modal-box">
+        <h3>👑 Transferir administración</h3>
+        <p>¿Transferir el rol de administrador a <strong id="transfer-hostname"></strong>? Tú pasarás a ser usuario estándar.</p>
+        <div class="modal-actions">
+            <button class="btn-confirm-transfer" id="btn-confirm-transfer">Transferir</button>
+            <button class="btn-cancel-modal" id="btn-cancel-transfer">Cancelar</button>
+        </div>
+    </div>
+</div>
+
+<script>
+let currentMachineId = '';
+let pendingRevoke    = null;
+let pendingTransfer  = null;
+let currentStatus    = null;
+
+window.addEventListener('DOMContentLoaded', async () => {
+    const savedTheme = localStorage.getItem('theme');
+    if (savedTheme === 'dark') document.body.classList.add('dark-mode');
+    window.adminAPI.onThemeChanged(t => document.body.classList.toggle('dark-mode', t === 'dark'));
+
+    currentMachineId = await window.adminAPI.getMachineId();
+    currentStatus    = await window.adminAPI.getStatus();
+    if (!currentStatus?.activated) { document.getElementById('devices-tbody').innerHTML = '<tr><td colspan="4" class="empty-state">Sin licencia activa.</td></tr>'; return; }
+
+    updateStats(currentStatus);
+    await loadDevices();
+
+    // Modal revocar
+    document.getElementById('btn-confirm-revoke').addEventListener('click', async () => {
+        if (!pendingRevoke) return;
+        const r = await window.adminAPI.revokeDevice(pendingRevoke);
+        closeModals();
+        if (r.success) await loadDevices();
+        else alert(r.error);
+    });
+    document.getElementById('btn-cancel-revoke').addEventListener('click', closeModals);
+
+    // Modal transferir
+    document.getElementById('btn-confirm-transfer').addEventListener('click', async () => {
+        if (!pendingTransfer) return;
+        const r = await window.adminAPI.transferAdmin(pendingTransfer);
+        closeModals();
+        if (r.success) await loadDevices();
+        else alert(r.error);
+    });
+    document.getElementById('btn-cancel-transfer').addEventListener('click', closeModals);
+});
+
+function updateStats(status) {
+    const daysEl  = document.getElementById('stat-days');
+    daysEl.textContent = status.daysLeft ?? '—';
+    daysEl.className   = 'stat-value ' + (status.daysLeft <= 3 ? 'warn' : 'ok');
+    document.getElementById('stat-seats-max').textContent   = status.maxSeats ?? '—';
+    document.getElementById('stat-estado').textContent      = status.estado   ?? '—';
+    document.getElementById('header-subtitle').textContent  = `Licencia: ${status.licenseKey ?? '—'}`;
+}
+
+async function loadDevices() {
+    if (!currentStatus) return;
+    const devices = await window.adminAPI.getDevices(currentStatus.licenseKey);
+    document.getElementById('stat-seats-used').textContent = devices.length;
+
+    const tbody = document.getElementById('devices-tbody');
+    if (!devices.length) {
+        tbody.innerHTML = '<tr><td colspan="4" class="empty-state">Sin dispositivos registrados.</td></tr>';
+        return;
+    }
+
+    tbody.innerHTML = devices.map(d => {
+        const isMe       = d.id_dispositivo === currentMachineId;
+        const isAdmin    = d.rol === 'admin';
+        const badgeCls   = isMe ? 'me' : (isAdmin ? 'admin' : 'standard');
+        const badgeTxt   = isAdmin ? '👑 Admin' : '👤 Estándar';
+        const fecha      = new Date(d.fecha_registro).toLocaleDateString('es-ES');
+
+        const revokeBtn  = isMe
+            ? `<button class="btn-sm btn-disabled" disabled>Revocar</button>`
+            : `<button class="btn-sm btn-danger" onclick="askRevoke('${d.id_dispositivo}','${d.hostname}')">Revocar</button>`;
+
+        const transferBtn = isMe || isAdmin
+            ? `<button class="btn-sm btn-disabled" disabled>Transferir admin</button>`
+            : `<button class="btn-sm btn-primary" onclick="askTransfer('${d.id_dispositivo}','${d.hostname}')">Transferir admin</button>`;
+
+        return `<tr>
+            <td><strong>${d.hostname}</strong>${isMe ? ' <span style="font-size:.75rem;color:#27ae60">(este PC)</span>' : ''}</td>
+            <td><span class="role-badge ${badgeCls}">${badgeTxt}</span></td>
+            <td style="color:#888;font-size:.82rem">${fecha}</td>
+            <td style="display:flex;gap:6px">${revokeBtn} ${transferBtn}</td>
+        </tr>`;
+    }).join('');
+}
+
+function askRevoke(deviceId, hostname) {
+    pendingRevoke = deviceId;
+    document.getElementById('revoke-hostname').textContent = hostname;
+    document.getElementById('modal-revoke').classList.add('open');
+}
+
+function askTransfer(deviceId, hostname) {
+    pendingTransfer = deviceId;
+    document.getElementById('transfer-hostname').textContent = hostname;
+    document.getElementById('modal-transfer').classList.add('open');
+}
+
+function closeModals() {
+    pendingRevoke = pendingTransfer = null;
+    document.querySelectorAll('.modal-overlay').forEach(m => m.classList.remove('open'));
+}
+</script>
+</body>
+</html>

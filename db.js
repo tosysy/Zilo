@@ -137,14 +137,235 @@ class ZiloDatabase {
                 FOREIGN KEY (backup_id) REFERENCES backups(id) ON DELETE CASCADE
             );
 
+            -- Tipos de documento definidos por el usuario
+            CREATE TABLE IF NOT EXISTS doc_types (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                name                TEXT    NOT NULL UNIQUE,
+                icon                TEXT    NOT NULL DEFAULT '📄',
+                folder              TEXT,
+                ocr_template_id     TEXT,
+                ocr_template_ids    TEXT    NOT NULL DEFAULT '[]',
+                created_at          DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
+            -- Patrones de renombrado aprendidos automáticamente de ejemplos manuales
+            CREATE TABLE IF NOT EXISTS learned_patterns (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                type_name     TEXT    NOT NULL,
+                before_kw     TEXT    NOT NULL,
+                after_kw      TEXT    NOT NULL DEFAULT '',
+                confirmations INTEGER NOT NULL DEFAULT 1,
+                last_confirmed DATETIME DEFAULT CURRENT_TIMESTAMP,
+                created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
             -- Índices para mejorar el rendimiento
             CREATE INDEX IF NOT EXISTS idx_ocr_doc_type ON ocr_documents(doc_type);
             CREATE INDEX IF NOT EXISTS idx_ocr_timestamp ON ocr_documents(timestamp);
             CREATE INDEX IF NOT EXISTS idx_backup_timestamp ON backups(timestamp);
             CREATE INDEX IF NOT EXISTS idx_backup_history_backup_id ON backup_history(backup_id);
+            CREATE INDEX IF NOT EXISTS idx_lp_type ON learned_patterns(type_name);
         `);
 
+        // ── Tablas de plantillas OCR (migradas desde JSON) ────────────────────
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS ocr_templates (
+                id            TEXT PRIMARY KEY,
+                nombre        TEXT NOT NULL,
+                identification TEXT NOT NULL DEFAULT '{}',
+                rename_parts  TEXT NOT NULL DEFAULT '[]',
+                confirmations INTEGER NOT NULL DEFAULT 0,
+                created_at    TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_tpl_nombre ON ocr_templates(nombre);
+
+            -- Patrones pendientes de formalizar (migrados desde JSON)
+            CREATE TABLE IF NOT EXISTS pending_patterns (
+                id          TEXT PRIMARY KEY,
+                fingerprint TEXT NOT NULL DEFAULT '[]',
+                type_name   TEXT NOT NULL DEFAULT '',
+                type_id     INTEGER,
+                renames     TEXT NOT NULL DEFAULT '[]',
+                count       INTEGER NOT NULL DEFAULT 1,
+                promoted    INTEGER NOT NULL DEFAULT 0,
+                created_at  TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_pp_type ON pending_patterns(type_name);
+            CREATE INDEX IF NOT EXISTS idx_pp_promoted ON pending_patterns(promoted);
+
+            -- Modelo ML: metadatos globales (fila única)
+            CREATE TABLE IF NOT EXISTS ml_metadata (
+                id          INTEGER PRIMARY KEY CHECK(id = 1),
+                total_docs  INTEGER NOT NULL DEFAULT 0,
+                version     INTEGER NOT NULL DEFAULT 2,
+                last_trained TEXT
+            );
+
+            -- Clases del modelo (una por tipo de documento)
+            CREATE TABLE IF NOT EXISTS ml_classes (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                class_name  TEXT NOT NULL UNIQUE,
+                total_words INTEGER NOT NULL DEFAULT 0,
+                doc_count   INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_ml_class ON ml_classes(class_name);
+
+            -- Frecuencias de palabras por clase (el "núcleo" del modelo)
+            CREATE TABLE IF NOT EXISTS ml_word_counts (
+                class_id INTEGER NOT NULL,
+                word     TEXT    NOT NULL,
+                count    INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (class_id, word),
+                FOREIGN KEY (class_id) REFERENCES ml_classes(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_wc_word ON ml_word_counts(word);
+
+            -- Frecuencia de documentos (para TF-IDF)
+            CREATE TABLE IF NOT EXISTS ml_doc_freq (
+                word           TEXT    PRIMARY KEY,
+                doc_frequency  INTEGER NOT NULL DEFAULT 1
+            );
+
+            -- Corpus de entrenamiento (últimos MAX_CORPUS_SIZE documentos)
+            CREATE TABLE IF NOT EXISTS ml_corpus (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                class_name TEXT NOT NULL,
+                tokens     TEXT NOT NULL,
+                added_at   INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_corpus_class ON ml_corpus(class_name);
+        `);
+
+        // ── Migraciones en caliente ────────────────────────────────────────────
+        // ocr_template_ids: columna añadida en v1.1 (array de IDs como JSON)
+        const dtCols = this.db.prepare("PRAGMA table_info(doc_types)").all();
+        if (!dtCols.some(c => c.name === 'ocr_template_ids')) {
+            this.db.exec("ALTER TABLE doc_types ADD COLUMN ocr_template_ids TEXT NOT NULL DEFAULT '[]'");
+            const rows = this.db.prepare("SELECT id, ocr_template_id FROM doc_types WHERE ocr_template_id IS NOT NULL AND ocr_template_id != ''").all();
+            const upd  = this.db.prepare("UPDATE doc_types SET ocr_template_ids=? WHERE id=?");
+            for (const row of rows) upd.run(JSON.stringify([row.ocr_template_id]), row.id);
+            console.log('[DB] Migración ocr_template_ids completada:', rows.length, 'tipos migrados');
+        }
+
+        // ── Auto-migración desde JSON en primer arranque ───────────────────────
+        this._migrateJsonIfNeeded();
+
         console.log('[DB] Tablas creadas/verificadas correctamente');
+    }
+
+    /**
+     * Si las tablas nuevas están vacías y existe el JSON correspondiente,
+     * migra los datos automáticamente y renombra el JSON como .backup
+     */
+    _migrateJsonIfNeeded() {
+        const userData = this.app.getPath('userData');
+
+        // ── Plantillas OCR ────────────────────────────────────────────────────
+        const tplCount = this.db.prepare('SELECT COUNT(*) as n FROM ocr_templates').get().n;
+        const tplJson  = path.join(userData, 'zilo-ocr-templates.json');
+        if (tplCount === 0 && fs.existsSync(tplJson)) {
+            try {
+                const data = JSON.parse(fs.readFileSync(tplJson, 'utf8'));
+                if (Array.isArray(data) && data.length > 0) {
+                    const insert = this.db.prepare(
+                        `INSERT OR IGNORE INTO ocr_templates(id, nombre, identification, rename_parts, confirmations, created_at)
+                         VALUES (?,?,?,?,?,?)`
+                    );
+                    const run = this.db.transaction(() => {
+                        for (const t of data) {
+                            insert.run(
+                                t.id,
+                                t.nombre || '',
+                                JSON.stringify(t.identification || {}),
+                                JSON.stringify(t.renameParts   || []),
+                                t.confirmations || 0,
+                                t.createdAt     || new Date().toISOString()
+                            );
+                        }
+                    });
+                    run();
+                    fs.renameSync(tplJson, tplJson + '.backup');
+                    console.log(`[DB] Migradas ${data.length} plantillas OCR desde JSON`);
+                }
+            } catch (e) { console.error('[DB] Error migrando plantillas OCR:', e.message); }
+        }
+
+        // ── Patrones pendientes ───────────────────────────────────────────────
+        const ppCount = this.db.prepare('SELECT COUNT(*) as n FROM pending_patterns').get().n;
+        const ppJson  = path.join(userData, 'zilo-pending-patterns.json');
+        if (ppCount === 0 && fs.existsSync(ppJson)) {
+            try {
+                const data = JSON.parse(fs.readFileSync(ppJson, 'utf8'));
+                if (Array.isArray(data) && data.length > 0) {
+                    const insert = this.db.prepare(
+                        `INSERT OR IGNORE INTO pending_patterns(id, fingerprint, type_name, type_id, renames, count, promoted, created_at)
+                         VALUES (?,?,?,?,?,?,?,?)`
+                    );
+                    const run = this.db.transaction(() => {
+                        for (const p of data) {
+                            insert.run(
+                                p.id,
+                                JSON.stringify(p.fingerprint || []),
+                                p.typeName  || '',
+                                p.typeId    || null,
+                                JSON.stringify(p.renames || []),
+                                p.count     || 1,
+                                p.promoted  ? 1 : 0,
+                                p.createdAt || new Date().toISOString()
+                            );
+                        }
+                    });
+                    run();
+                    fs.renameSync(ppJson, ppJson + '.backup');
+                    console.log(`[DB] Migrados ${data.length} patrones pendientes desde JSON`);
+                }
+            } catch (e) { console.error('[DB] Error migrando patrones pendientes:', e.message); }
+        }
+
+        // ── Modelo ML ─────────────────────────────────────────────────────────
+        const mlCount = this.db.prepare('SELECT COUNT(*) as n FROM ml_metadata').get().n;
+        const mlJson  = path.join(userData, 'zilo-ml-model.json');
+        if (mlCount === 0 && fs.existsSync(mlJson)) {
+            try {
+                const model = JSON.parse(fs.readFileSync(mlJson, 'utf8'));
+                if (model && model.totalDocs > 0) {
+                    this._migrateMLModel(model);
+                    fs.renameSync(mlJson, mlJson + '.backup');
+                    console.log(`[DB] Modelo ML migrado: ${model.totalDocs} docs, ${Object.keys(model.classes || {}).length} clases`);
+                }
+            } catch (e) { console.error('[DB] Error migrando modelo ML:', e.message); }
+        }
+    }
+
+    _migrateMLModel(model) {
+        const insertClass   = this.db.prepare(`INSERT OR IGNORE INTO ml_classes(class_name, total_words, doc_count) VALUES (?,?,?)`);
+        const getClassId    = this.db.prepare(`SELECT id FROM ml_classes WHERE class_name = ?`);
+        const insertWord    = this.db.prepare(`INSERT OR REPLACE INTO ml_word_counts(class_id, word, count) VALUES (?,?,?)`);
+        const insertDocFreq = this.db.prepare(`INSERT OR REPLACE INTO ml_doc_freq(word, doc_frequency) VALUES (?,?)`);
+        const insertCorpus  = this.db.prepare(`INSERT INTO ml_corpus(class_name, tokens) VALUES (?,?)`);
+        const insertMeta    = this.db.prepare(`INSERT OR REPLACE INTO ml_metadata(id, total_docs, version, last_trained) VALUES (1,?,?,?)`);
+
+        const run = this.db.transaction(() => {
+            insertMeta.run(model.totalDocs || 0, model.version || 2, model.lastTrained || null);
+
+            for (const [className, cls] of Object.entries(model.classes || {})) {
+                insertClass.run(className, cls.totalWords || 0, cls.docCount || 0);
+                const classId = getClassId.get(className)?.id;
+                if (!classId) continue;
+                for (const [word, count] of Object.entries(cls.wordCounts || {})) {
+                    insertWord.run(classId, word, count);
+                }
+            }
+
+            for (const [word, freq] of Object.entries(model.docFreq || {})) {
+                insertDocFreq.run(word, freq);
+            }
+
+            for (const entry of (model.corpus || [])) {
+                insertCorpus.run(entry.className, entry.tokens);
+            }
+        });
+        run();
     }
 
     // =========================================================================
@@ -502,6 +723,417 @@ class ZiloDatabase {
             return { success: false, error: error.message };
         }
     }
+
+    // =========================================================================
+    // APRENDIZAJE DE PATRONES DE RENOMBRADO
+    // =========================================================================
+
+    /** Elimina acentos y normaliza espacios para comparacion robusta con OCR. */
+    _normalizeForSearch(text) {
+        return text
+            .normalize('NFD').replace(/[̀-ͯ]/g, '')
+            .replace(/\s+/g, ' ')
+            .toLowerCase()
+            .trim();
+    }
+
+    /**
+     * Aprende donde esta el texto de renombrado dentro del OCR a partir de
+     * un ejemplo manual. Guarda la(s) palabra(s) clave que preceden al numero;
+     * en futuros documentos se usan para localizar el dato automaticamente.
+     *
+     * @param {string} typeName  - Nombre del tipo (ej: "ALBARAN")
+     * @param {string} ocrText   - Texto OCR completo del documento
+     * @param {string} finalName - Nombre final dado por el usuario (ej: "1-13770 ALBARAN.pdf")
+     */
+    learnRenamePattern(typeName, ocrText, finalName) {
+        try {
+            if (!typeName?.trim() || !ocrText?.trim() || !finalName?.trim()) return { success: false };
+
+            // 1. Extraer la parte de renombrado del nombre de archivo
+            const baseName = finalName.replace(/\.pdf$/i, '').trim();
+
+            // Prioridad: detectar directamente el patrón numérico de documento
+            // (serie-codigo, como "1-13770", "2024/00123", "DUA-2024/001")
+            // Esto es más robusto que quitar el nombre del tipo, porque el usuario
+            // podría escribir el nombre en cualquier orden.
+            const numMatch = baseName.match(/\b([A-Z0-9][\w\-\/\.]*\d[\w\-\/\.]*\d[\w\-\/\.]*)\b/);
+            let renamePart = '';
+            if (numMatch) {
+                renamePart = numMatch[1].trim();
+            } else {
+                // Fallback: quitar el nombre del tipo y quedarse con lo que sobra
+                const escapedType = typeName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                renamePart = baseName.replace(new RegExp(`\\s*${escapedType}\\s*`, 'gi'), '').trim();
+            }
+            if (!renamePart || renamePart.length < 2) return { success: false, reason: 'no_rename_part' };
+
+            // 2. Normalizar OCR para busqueda robusta
+            const normOcr    = this._normalizeForSearch(ocrText);
+            const normRename = this._normalizeForSearch(renamePart);
+
+            // 3. Candidatos de busqueda (varias formas del numero en el OCR)
+            const digits = renamePart.replace(/\D/g, '');
+            const candidates = [normRename];
+            if (digits.length >= 4) {
+                const s = digits.charAt(0), c = digits.slice(1);
+                candidates.push(digits, `${s} ${c}`, `${s}/${c}`, `${s} 0${c}`, `${s}0${c}`);
+            }
+
+            // 4. Localizar en el OCR normalizado
+            let foundPos = -1, matchedLen = normRename.length;
+            for (const cand of candidates) {
+                const pos = normOcr.indexOf(cand);
+                if (pos !== -1) { foundPos = pos; matchedLen = cand.length; break; }
+            }
+
+            // 4b. Regex flexible como ultimo recurso
+            if (foundPos === -1 && digits.length >= 4) {
+                const regStr = digits.split('').join('[\\s\\-\\/]?0{0,1}');
+                try {
+                    const m = normOcr.match(new RegExp(regStr, 'i'));
+                    if (m) { foundPos = m.index; matchedLen = m[0].length; }
+                } catch (_) {}
+            }
+
+            if (foundPos === -1) return { success: false, reason: 'not_found_in_ocr' };
+
+            // 5. Keyword ANTES del numero (ultimas 2 palabras no numericas)
+            const beforeCtx   = normOcr.slice(Math.max(0, foundPos - 80), foundPos).trim();
+            const beforeWords = beforeCtx.split(/\s+/).filter(w => w.length >= 3 && /[a-z]/.test(w));
+            const beforeKw    = beforeWords.slice(-2).join(' ').trim();
+            if (!beforeKw) return { success: false, reason: 'no_before_keyword' };
+
+            // 6. Keyword DESPUES (primera palabra no numerica, opcional)
+            const afterCtx   = normOcr.slice(foundPos + matchedLen, foundPos + matchedLen + 60).replace(/^[\s:]+/, '');
+            const afterWords = afterCtx.split(/\s+/).filter(w => w.length >= 3 && /[a-z]/.test(w));
+            const afterKw    = (afterWords[0] || '').trim();
+
+            // 7. Guardar o incrementar confirmaciones
+            const existing = this.db.prepare(
+                'SELECT id, confirmations FROM learned_patterns WHERE type_name=? AND before_kw=?'
+            ).get(typeName, beforeKw);
+
+            if (existing) {
+                this.db.prepare(
+                    `UPDATE learned_patterns
+                     SET confirmations=confirmations+1, after_kw=?, last_confirmed=CURRENT_TIMESTAMP
+                     WHERE id=?`
+                ).run(afterKw, existing.id);
+                const newCount = existing.confirmations + 1;
+                console.log(`[Pattern] "${typeName}" confirmado: "${beforeKw}" (x${newCount})`);
+                return { success: true, action: 'confirmed', id: existing.id, confirmations: newCount };
+            } else {
+                const r = this.db.prepare(
+                    'INSERT INTO learned_patterns (type_name, before_kw, after_kw) VALUES (?, ?, ?)'
+                ).run(typeName, beforeKw, afterKw);
+                console.log(`[Pattern] "${typeName}" nuevo: "${beforeKw}" -> "${afterKw}"`);
+                return { success: true, action: 'created', id: r.lastInsertRowid, confirmations: 1 };
+            }
+        } catch (e) {
+            console.error('[DB] Error en learnRenamePattern:', e.message);
+            return { success: false, error: e.message };
+        }
+    }
+
+    /**
+     * Devuelve patrones aprendidos para un tipo (>=2 confirmaciones),
+     * ordenados por numero de confirmaciones descendente.
+     */
+    getLearnedPatterns(typeName) {
+        try {
+            return this.db.prepare(
+                `SELECT * FROM learned_patterns
+                 WHERE type_name=? AND confirmations >= 2
+                 ORDER BY confirmations DESC`
+            ).all(typeName || '');
+        } catch (e) {
+            console.error('[DB] Error en getLearnedPatterns:', e.message);
+            return [];
+        }
+    }
+
+    // =========================================================================
+    // PLANTILLAS OCR
+    // =========================================================================
+
+    getAllTemplates() {
+        const rows = this.db.prepare('SELECT * FROM ocr_templates ORDER BY created_at ASC').all();
+        return rows.map(r => ({
+            id:             r.id,
+            nombre:         r.nombre,
+            identification: JSON.parse(r.identification || '{}'),
+            renameParts:    JSON.parse(r.rename_parts   || '[]'),
+            confirmations:  r.confirmations,
+            createdAt:      r.created_at,
+        }));
+    }
+
+    saveTemplate(data) {
+        const id  = data.id || `tpl_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        const existing = this.db.prepare('SELECT confirmations, created_at FROM ocr_templates WHERE id = ?').get(id);
+        this.db.prepare(`
+            INSERT INTO ocr_templates(id, nombre, identification, rename_parts, confirmations, created_at)
+            VALUES (?,?,?,?,?,?)
+            ON CONFLICT(id) DO UPDATE SET
+                nombre         = excluded.nombre,
+                identification = excluded.identification,
+                rename_parts   = excluded.rename_parts
+        `).run(
+            id,
+            data.nombre || '',
+            JSON.stringify(data.identification || {}),
+            JSON.stringify(data.renameParts    || []),
+            existing?.confirmations || 0,
+            existing?.created_at    || new Date().toISOString()
+        );
+        console.log(`[OCR-ZONAL] Plantilla guardada: "${data.nombre}" (${id})`);
+        return { success: true, id };
+    }
+
+    deleteTemplate(id) {
+        const r = this.db.prepare('DELETE FROM ocr_templates WHERE id = ?').run(id);
+        console.log(`[OCR-ZONAL] Plantilla eliminada: ${id}`);
+        return { success: true, deleted: r.changes > 0 };
+    }
+
+    incrementTemplateConfirmations(id) {
+        const r = this.db.prepare(
+            'UPDATE ocr_templates SET confirmations = confirmations + 1 WHERE id = ?'
+        ).run(id);
+        if (!r.changes) return { success: false };
+        const tpl = this.db.prepare('SELECT confirmations FROM ocr_templates WHERE id = ?').get(id);
+        return { success: true, confirmations: tpl?.confirmations || 0 };
+    }
+
+    // =========================================================================
+    // PATRONES PENDIENTES
+    // =========================================================================
+
+    getPendingPatterns() {
+        const rows = this.db.prepare('SELECT * FROM pending_patterns ORDER BY created_at ASC').all();
+        return rows.map(r => ({
+            id:          r.id,
+            fingerprint: JSON.parse(r.fingerprint || '[]'),
+            typeName:    r.type_name,
+            typeId:      r.type_id,
+            renames:     JSON.parse(r.renames || '[]'),
+            count:       r.count,
+            promoted:    r.promoted === 1,
+            createdAt:   r.created_at,
+        }));
+    }
+
+    addPendingPattern({ fingerprint, typeName, typeId, finalName }) {
+        // Cargar todos los no-promovidos para buscar similitud
+        const existing = this.getPendingPatterns().filter(p => !p.promoted);
+        const entry    = { finalName, date: new Date().toISOString() };
+
+        const match = existing.find(p =>
+            _fingerprintSimilarity(p.fingerprint, fingerprint) >= 0.4
+        );
+
+        if (match) {
+            const newFp      = [...new Set([...match.fingerprint, ...fingerprint])].slice(0, 30);
+            const newRenames = [entry, ...match.renames].slice(0, 10);
+            this.db.prepare(`
+                UPDATE pending_patterns
+                SET fingerprint = ?, renames = ?, count = count + 1,
+                    type_name = COALESCE(NULLIF(type_name,''), ?),
+                    type_id   = COALESCE(type_id, ?)
+                WHERE id = ?
+            `).run(JSON.stringify(newFp), JSON.stringify(newRenames), typeName || '', typeId || null, match.id);
+        } else {
+            this.db.prepare(`
+                INSERT INTO pending_patterns(id, fingerprint, type_name, type_id, renames, count, promoted, created_at)
+                VALUES (?,?,?,?,?,1,0,?)
+            `).run(
+                `pp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                JSON.stringify((fingerprint || []).slice(0, 30)),
+                typeName  || '',
+                typeId    || null,
+                JSON.stringify([entry]),
+                new Date().toISOString()
+            );
+        }
+        return { success: true };
+    }
+
+    deletePendingPattern(id) {
+        this.db.prepare('DELETE FROM pending_patterns WHERE id = ?').run(id);
+        return { success: true };
+    }
+
+    promotePendingPattern(id) {
+        this.db.prepare('UPDATE pending_patterns SET promoted = 1 WHERE id = ?').run(id);
+        return { success: true };
+    }
+
+    // =========================================================================
+    // MODELO ML (persistencia incremental)
+    // =========================================================================
+
+    /**
+     * Carga el modelo ML completo desde SQLite en la estructura en memoria
+     * que espera MLEngine. Devuelve null si no hay datos.
+     */
+    mlLoad() {
+        const meta = this.db.prepare('SELECT * FROM ml_metadata WHERE id = 1').get();
+        if (!meta) return null;
+
+        const model = {
+            version:     meta.version,
+            totalDocs:   meta.total_docs,
+            lastTrained: meta.last_trained,
+            classes:     {},
+            docFreq:     {},
+            corpus:      [],
+        };
+
+        // Clases y word counts
+        const classes = this.db.prepare('SELECT * FROM ml_classes').all();
+        for (const cls of classes) {
+            const words = this.db.prepare(
+                'SELECT word, count FROM ml_word_counts WHERE class_id = ?'
+            ).all(cls.id);
+            const wordCounts = {};
+            for (const w of words) wordCounts[w.word] = w.count;
+            model.classes[cls.class_name] = {
+                wordCounts,
+                totalWords: cls.total_words,
+                docCount:   cls.doc_count,
+            };
+        }
+
+        // Document frequency
+        const docFreqs = this.db.prepare('SELECT word, doc_frequency FROM ml_doc_freq').all();
+        for (const d of docFreqs) model.docFreq[d.word] = d.doc_frequency;
+
+        // Corpus
+        const corpus = this.db.prepare('SELECT class_name, tokens FROM ml_corpus ORDER BY id ASC').all();
+        model.corpus = corpus.map(c => ({ className: c.class_name, tokens: c.tokens }));
+
+        return model;
+    }
+
+    /**
+     * Persiste una sesión de entrenamiento de forma incremental.
+     * Recibe los deltas exactos para no reescribir todo el modelo.
+     */
+    mlSaveTrain({ className, tf, uniqueTokens, totalDocs, lastTrained, corpusEntry, maxCorpusSize }) {
+        const upsertClass = this.db.prepare(`
+            INSERT INTO ml_classes(class_name, total_words, doc_count)
+            VALUES (?, 0, 0)
+            ON CONFLICT(class_name) DO NOTHING
+        `);
+        const updateClass = this.db.prepare(`
+            UPDATE ml_classes
+            SET total_words = total_words + ?, doc_count = doc_count + 1
+            WHERE class_name = ?
+        `);
+        const getClassId  = this.db.prepare('SELECT id FROM ml_classes WHERE class_name = ?');
+        const upsertWord  = this.db.prepare(`
+            INSERT INTO ml_word_counts(class_id, word, count) VALUES (?,?,?)
+            ON CONFLICT(class_id, word) DO UPDATE SET count = count + excluded.count
+        `);
+        const upsertFreq  = this.db.prepare(`
+            INSERT INTO ml_doc_freq(word, doc_frequency) VALUES (?,1)
+            ON CONFLICT(word) DO UPDATE SET doc_frequency = doc_frequency + 1
+        `);
+        const insertCorpus = this.db.prepare(
+            'INSERT INTO ml_corpus(class_name, tokens) VALUES (?,?)'
+        );
+        const countCorpus = this.db.prepare('SELECT COUNT(*) as n FROM ml_corpus');
+        const getOldest   = this.db.prepare(`
+            SELECT mc.id FROM ml_corpus mc
+            JOIN (
+                SELECT class_name, COUNT(*) as cnt FROM ml_corpus GROUP BY class_name ORDER BY cnt DESC LIMIT 1
+            ) top ON mc.class_name = top.class_name
+            ORDER BY mc.id ASC LIMIT 1
+        `);
+        const deleteCorpus = this.db.prepare('DELETE FROM ml_corpus WHERE id = ?');
+        const upsertMeta   = this.db.prepare(`
+            INSERT OR REPLACE INTO ml_metadata(id, total_docs, version, last_trained)
+            VALUES (1,?,2,?)
+        `);
+
+        const totalTfWords = Object.values(tf).reduce((s, v) => s + v, 0);
+
+        this.db.transaction(() => {
+            upsertClass.run(className);
+            updateClass.run(totalTfWords, className);
+            const classId = getClassId.get(className)?.id;
+            if (classId) {
+                for (const [word, count] of Object.entries(tf)) {
+                    upsertWord.run(classId, word, count);
+                }
+            }
+            for (const word of uniqueTokens) upsertFreq.run(word);
+
+            insertCorpus.run(corpusEntry.className, corpusEntry.tokens);
+            if (countCorpus.get().n > maxCorpusSize) {
+                const old = getOldest.get();
+                if (old) deleteCorpus.run(old.id);
+            }
+
+            upsertMeta.run(totalDocs, lastTrained);
+        })();
+    }
+
+    mlGetStats() {
+        const meta = this.db.prepare('SELECT * FROM ml_metadata WHERE id = 1').get();
+        if (!meta) return { totalDocs: 0, classCount: 0, vocabSize: 0, classes: {} };
+
+        const classes   = this.db.prepare('SELECT * FROM ml_classes').all();
+        const vocabSize = this.db.prepare('SELECT COUNT(*) as n FROM ml_doc_freq').get().n;
+        const result    = {
+            totalDocs:  meta.total_docs,
+            classCount: classes.length,
+            vocabSize,
+            lastTrained: meta.last_trained,
+            classes: {},
+        };
+        for (const c of classes) {
+            const q = Math.min(100, Math.round((c.doc_count / 50) * 100));
+            result.classes[c.class_name] = {
+                docCount:    c.doc_count,
+                wordCount:   c.total_words,
+                quality:     c.doc_count >= 50 ? 'excelente' : c.doc_count >= 15 ? 'buena' : c.doc_count >= 5 ? 'mejorando' : 'insuficiente',
+                qualityPct:  q,
+                qualityIcon: c.doc_count >= 50 ? '⭐' : c.doc_count >= 15 ? '🎓' : c.doc_count >= 5 ? '📈' : '🌱',
+            };
+        }
+        return result;
+    }
+
+    mlDeleteClass(className) {
+        const cls = this.db.prepare('SELECT id FROM ml_classes WHERE class_name = ?').get(className);
+        if (!cls) return { success: false };
+        this.db.prepare('DELETE FROM ml_classes WHERE id = ?').run(cls.id);
+        this.db.prepare('DELETE FROM ml_corpus WHERE class_name = ?').run(className);
+        // Recalcular totalDocs
+        const total = this.db.prepare('SELECT SUM(doc_count) as n FROM ml_classes').get().n || 0;
+        this.db.prepare('UPDATE ml_metadata SET total_docs = ? WHERE id = 1').run(total);
+        return { success: true };
+    }
+
+    mlReset() {
+        this.db.transaction(() => {
+            this.db.exec('DELETE FROM ml_word_counts');
+            this.db.exec('DELETE FROM ml_classes');
+            this.db.exec('DELETE FROM ml_doc_freq');
+            this.db.exec('DELETE FROM ml_corpus');
+            this.db.exec('DELETE FROM ml_metadata');
+        })();
+        return { success: true };
+    }
+}
+
+/** Similitud de dos arrays de palabras (usada para patrones pendientes). */
+function _fingerprintSimilarity(fp1, fp2) {
+    if (!fp1?.length || !fp2?.length) return 0;
+    const set2 = new Set(fp2);
+    return fp1.filter(w => set2.has(w)).length / Math.max(fp1.length, fp2.length);
 }
 
 module.exports = ZiloDatabase;

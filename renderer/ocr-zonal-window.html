@@ -1,0 +1,1592 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Motor OCR Zonal — Zilo</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/4.1.1/tesseract.min.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #f0f2f5; color: #2c3e50; height: 100vh; overflow: hidden;
+}
+body.dark-mode { background: #1a1a1a; color: #e0e0e0; }
+
+.layout {
+    display: grid; grid-template-columns: 1fr 320px; height: 100vh;
+}
+
+/* ── Visor PDF ── */
+.viewer-panel {
+    display: flex; flex-direction: column;
+    background: #fff; border-right: 1px solid #e0e0e0; overflow: hidden;
+}
+body.dark-mode .viewer-panel { background: #242424; border-color: #333; }
+
+.viewer-toolbar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px; border-bottom: 1px solid #e8e8e8;
+    background: #fafafa; flex-shrink: 0;
+}
+body.dark-mode .viewer-toolbar { background: #2a2a2a; border-color: #333; }
+
+.toolbar-btn {
+    display: flex; align-items: center; gap: 6px;
+    padding: 7px 13px; border: 1.5px solid #d0d0d0; border-radius: 7px;
+    background: white; font-size: .82rem; font-weight: 600; cursor: pointer;
+    color: #3b4245; transition: all .15s; white-space: nowrap;
+}
+.toolbar-btn:hover { border-color: #3b4245; background: #f5f5f5; }
+body.dark-mode .toolbar-btn { background: #333; border-color: #555; color: #e0e0e0; }
+body.dark-mode .toolbar-btn:hover { background: #3a3a3a; border-color: #777; }
+
+.page-nav { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+.page-nav button {
+    width: 28px; height: 28px; border: 1.5px solid #d0d0d0; border-radius: 6px;
+    background: white; cursor: pointer; font-size: 1rem; color: #555;
+    display: flex; align-items: center; justify-content: center; transition: all .15s;
+}
+.page-nav button:hover:not(:disabled) { border-color: #3b4245; background: #f5f5f5; }
+.page-nav button:disabled { opacity: .4; cursor: default; }
+body.dark-mode .page-nav button { background: #333; border-color: #555; color: #ccc; }
+.page-indicator { font-size: .82rem; color: #888; white-space: nowrap; }
+
+/* Zoom */
+.zoom-controls { display: flex; align-items: center; gap: 4px; margin-left: 8px; }
+.zoom-btn {
+    width: 26px; height: 26px; border: 1.5px solid #d0d0d0; border-radius: 6px;
+    background: white; cursor: pointer; font-size: .9rem; color: #555;
+    display: flex; align-items: center; justify-content: center; transition: all .15s; font-weight: 700;
+}
+.zoom-btn:hover { border-color: #3b4245; background: #f5f5f5; }
+body.dark-mode .zoom-btn { background: #333; border-color: #555; color: #ccc; }
+body.dark-mode .zoom-btn:hover { background: #3a3a3a; border-color: #777; }
+.zoom-label { font-size: .78rem; color: #888; min-width: 38px; text-align: center; }
+
+/* Botones Hecho / Cancelar */
+.btn-done   { background: #16a34a; color: white; border: none; border-radius: 7px; padding: 7px 16px; font-size: .82rem; font-weight: 700; cursor: pointer; transition: background .15s; }
+.btn-done:hover   { background: #15803d; }
+.btn-cancel-win { background: #e5e7eb; color: #374151; border: none; border-radius: 7px; padding: 7px 14px; font-size: .82rem; font-weight: 600; cursor: pointer; transition: background .15s; }
+.btn-cancel-win:hover { background: #d1d5db; }
+body.dark-mode .btn-cancel-win { background: #3a3a3a; color: #ccc; }
+body.dark-mode .btn-cancel-win:hover { background: #444; }
+
+.tools-bar {
+    display: flex; gap: 8px; padding: 8px 14px;
+    border-bottom: 1px solid #e8e8e8; flex-shrink: 0; background: #fafafa;
+}
+body.dark-mode .tools-bar { background: #2a2a2a; border-color: #333; }
+
+.tool-btn {
+    flex: 1; padding: 8px 10px; border-radius: 8px; border: 2px solid transparent;
+    cursor: pointer; font-size: .8rem; font-weight: 600; text-align: left;
+    transition: all .15s; background: #f0f2f5;
+}
+.tool-btn .tool-label { display: block; }
+.tool-btn .tool-hint  { display: block; font-size: .72rem; font-weight: 400; opacity: .7; margin-top: 2px; }
+
+.tool-btn.id-tool     { color: #b45309; }
+.tool-btn.id-tool.active   { background: #fef3c7; border-color: #f59e0b; }
+.tool-btn.id-tool:hover:not(.active)   { background: #fffbeb; }
+.tool-btn.rename-tool { color: #065f46; }
+.tool-btn.rename-tool.active { background: #d1fae5; border-color: #10b981; }
+.tool-btn.rename-tool:hover:not(.active) { background: #ecfdf5; }
+
+body.dark-mode .tool-btn { background: #2d2d2d; }
+body.dark-mode .tool-btn.id-tool { color: #fcd34d; }
+body.dark-mode .tool-btn.id-tool.active { background: #422006; border-color: #f59e0b; }
+body.dark-mode .tool-btn.rename-tool { color: #6ee7b7; }
+body.dark-mode .tool-btn.rename-tool.active { background: #064e3b; border-color: #10b981; }
+
+.canvas-area {
+    flex: 1; overflow: auto; background: #888;
+    /* Sin justify-content:center para evitar que el overflow izquierdo quede inaccesible */
+    display: flex; align-items: flex-start; justify-content: flex-start; padding: 20px;
+}
+body.dark-mode .canvas-area { background: #111; }
+
+/* margin:auto en un flex-item centra cuando cabe y se ancla a la izquierda cuando desborda */
+.canvas-wrapper {
+    position: relative; display: inline-block;
+    box-shadow: 0 4px 20px rgba(0,0,0,.3);
+    margin: 0 auto; flex-shrink: 0;
+}
+#pdf-canvas  { display: block; }
+#draw-canvas { position: absolute; top: 0; left: 0; cursor: default; user-select: none; }
+
+.empty-state {
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; flex: 1; align-self: stretch;
+    gap: 14px; color: #999; text-align: center;
+}
+.empty-state .empty-icon { font-size: 3.5rem; }
+.empty-state p { font-size: .9rem; line-height: 1.5; max-width: 260px; }
+.empty-state .load-hint { font-size: .8rem; color: #bbb; }
+
+.spinner { display: flex; flex-direction: column; align-items: center; justify-content: center; flex: 1; align-self: stretch; gap: 12px; color: #888; }
+.spinner-ring { width: 36px; height: 36px; border: 3px solid #e0e0e0; border-top-color: #3b82f6; border-radius: 50%; animation: spin .7s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Panel derecho ── */
+.right-panel { display: flex; flex-direction: column; background: #f7f8fa; overflow: hidden; }
+body.dark-mode .right-panel { background: #1e1e1e; }
+
+.panel-scroll { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 14px; }
+
+.template-card { background: white; border-radius: 10px; padding: 14px; border: 1px solid #e5e7eb; display: flex; flex-direction: column; gap: 10px; }
+body.dark-mode .template-card { background: #262626; border-color: #333; }
+
+.card-title { font-size: .9rem; font-weight: 700; color: #2c3e50; }
+body.dark-mode .card-title { color: #e0e0e0; }
+
+.field-label { font-size: .77rem; font-weight: 600; color: #666; margin-bottom: 4px; }
+body.dark-mode .field-label { color: #aaa; }
+
+.field-input { width: 100%; padding: 8px 10px; border: 1.5px solid #d5d5d5; border-radius: 7px; font-size: .85rem; background: #fff; color: #2c3e50; transition: border-color .15s; }
+.field-input:focus { outline: none; border-color: #3b82f6; }
+body.dark-mode .field-input { background: #1a1a1a; border-color: #444; color: #e0e0e0; }
+
+.zone-card { border-radius: 8px; padding: 10px; border: 1.5px solid #e5e7eb; }
+body.dark-mode .zone-card { border-color: #333; }
+.zone-card.id-zone   { border-color: #fde68a; background: #fffbeb; }
+.zone-card.id-zone.filled   { border-color: #f59e0b; }
+body.dark-mode .zone-card.id-zone { background: #2a2000; border-color: #78350f; }
+body.dark-mode .zone-card.id-zone.filled { border-color: #f59e0b; }
+.zone-card.rename-zone { border-color: #a7f3d0; background: #f0fdf4; }
+.zone-card.rename-zone.filled { border-color: #10b981; }
+body.dark-mode .zone-card.rename-zone { background: #001a0d; border-color: #065f46; }
+body.dark-mode .zone-card.rename-zone.filled { border-color: #10b981; }
+
+.zone-header { display: flex; align-items: center; gap: 7px; font-size: .8rem; font-weight: 700; margin-bottom: 6px; }
+.zone-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+.zone-dot.id-dot     { background: #f59e0b; }
+.zone-dot.rename-dot { background: #10b981; }
+.zone-status-icon { margin-left: auto; font-size: 1rem; }
+
+.zone-text-preview { font-size: .76rem; color: #555; background: rgba(0,0,0,.04); padding: 5px 7px; border-radius: 5px; font-style: italic; max-height: 52px; overflow: hidden; line-height: 1.4; word-break: break-word; }
+body.dark-mode .zone-text-preview { color: #bbb; background: rgba(255,255,255,.06); }
+.zone-text-preview.empty { color: #aaa; font-style: normal; font-size: .75rem; }
+.zone-page-info { font-size: .72rem; color: #999; margin-top: 4px; }
+
+.ocr-running { display: flex; align-items: center; gap: 8px; font-size: .77rem; color: #3b82f6; padding: 6px 8px; background: #eff6ff; border-radius: 6px; margin-top: 6px; }
+body.dark-mode .ocr-running { background: #1e3a5f; color: #93c5fd; }
+.ocr-spinner { width: 14px; height: 14px; border: 2px solid #bfdbfe; border-top-color: #3b82f6; border-radius: 50%; animation: spin .6s linear infinite; flex-shrink: 0; }
+
+.btn-save-tpl { width: 100%; padding: 9px; border-radius: 8px; background: #2563eb; color: white; border: none; font-size: .85rem; font-weight: 700; cursor: pointer; transition: background .15s; margin-top: 2px; }
+.btn-save-tpl:hover:not(:disabled) { background: #1d4ed8; }
+.btn-save-tpl:disabled { background: #9ca3af; cursor: default; }
+
+.section-header { display: flex; align-items: center; justify-content: space-between; font-size: .78rem; font-weight: 700; color: #888; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 8px; }
+.count-badge { background: #e5e7eb; color: #555; border-radius: 10px; padding: 1px 7px; font-size: .7rem; }
+body.dark-mode .count-badge { background: #333; color: #aaa; }
+
+.template-item { background: white; border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px 12px; margin-bottom: 7px; display: flex; align-items: center; gap: 8px; }
+body.dark-mode .template-item { background: #262626; border-color: #333; }
+.tpl-icon { font-size: 1.3rem; flex-shrink: 0; }
+.tpl-info { flex: 1; min-width: 0; }
+.tpl-name { font-size: .83rem; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tpl-sub  { font-size: .72rem; color: #888; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tpl-delete { width: 26px; height: 26px; border-radius: 6px; border: 1px solid #e0e0e0; background: transparent; cursor: pointer; color: #dc2626; font-size: .9rem; display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: all .15s; }
+.tpl-delete:hover { background: #fee2e2; border-color: #dc2626; }
+body.dark-mode .tpl-delete { border-color: #444; }
+body.dark-mode .tpl-delete:hover { background: #3b0000; }
+.no-templates { font-size: .8rem; color: #aaa; text-align: center; padding: 16px 0; }
+
+/* ── Parts builder ───────────────────────────────────────────────────────────── */
+.parts-builder { display: flex; flex-direction: column; gap: 6px; }
+.parts-empty-hint { font-size: .77rem; color: #bbb; text-align: center; padding: 10px 0; }
+.parts-add-row  { display: flex; gap: 6px; margin-top: 2px; flex-wrap: wrap; }
+.btn-add-part { flex: 1; min-width: 80px; padding: 6px 8px; border-radius: 7px; border: 1.5px dashed #d0d0d0; background: transparent; font-size: .78rem; font-weight: 600; cursor: pointer; transition: all .15s; }
+.btn-add-part.text-part { color: #555; }
+.btn-add-part.text-part:hover { border-color: #555; background: #f5f5f5; }
+.btn-add-part.ocr-part  { color: #065f46; }
+.btn-add-part.ocr-part:hover  { border-color: #10b981; background: #ecfdf5; }
+.btn-add-part.search-part { color: #4338ca; }
+.btn-add-part.search-part:hover { border-color: #6366f1; background: #eef2ff; }
+body.dark-mode .btn-add-part { border-color: #444; color: #aaa; }
+body.dark-mode .btn-add-part.text-part:hover { background: #333; border-color: #777; }
+body.dark-mode .btn-add-part.ocr-part:hover  { background: #064e3b; border-color: #10b981; color: #6ee7b7; }
+body.dark-mode .btn-add-part.search-part:hover { background: #1e1b4b; border-color: #6366f1; color: #a5b4fc; }
+
+.part-card { border-radius: 8px; border: 1.5px solid #e5e7eb; padding: 8px 10px; background: #fff; display: flex; flex-direction: column; gap: 6px; }
+body.dark-mode .part-card { background: #1e1e1e; border-color: #333; }
+.part-card.text-part-card   { border-left: 3px solid #94a3b8; }
+.part-card.ocr-part-card    { border-left: 3px solid #10b981; }
+.part-card.search-part-card { border-left: 3px solid #6366f1; }
+.part-card.ocr-part-card.drawing { border-left-color: #f59e0b; border-color: #f59e0b; background: #fffbeb; }
+body.dark-mode .part-card.ocr-part-card.drawing { background: #2a2000; border-color: #f59e0b; }
+
+.part-header { display: flex; align-items: center; gap: 6px; }
+.part-badge  { font-size: .72rem; font-weight: 700; padding: 2px 7px; border-radius: 10px; flex-shrink: 0; }
+.part-badge.text-badge   { background: #f1f5f9; color: #475569; }
+.part-badge.ocr-badge    { background: #d1fae5; color: #065f46; }
+.part-badge.search-badge { background: #e0e7ff; color: #3730a3; }
+body.dark-mode .part-badge.text-badge   { background: #2a2a2a; color: #94a3b8; }
+body.dark-mode .part-badge.ocr-badge    { background: #064e3b; color: #6ee7b7; }
+body.dark-mode .part-badge.search-badge { background: #1e1b4b; color: #a5b4fc; }
+.part-delete { margin-left: auto; width: 22px; height: 22px; border-radius: 5px; border: 1px solid #e0e0e0; background: transparent; cursor: pointer; color: #dc2626; font-size: .75rem; display: flex; align-items: center; justify-content: center; transition: all .15s; flex-shrink: 0; }
+.part-delete:hover { background: #fee2e2; border-color: #dc2626; }
+body.dark-mode .part-delete { border-color: #444; }
+body.dark-mode .part-delete:hover { background: #3b0000; }
+
+.btn-draw-zone { width: 100%; padding: 6px 8px; border-radius: 6px; border: 1.5px dashed #10b981; background: #f0fdf4; color: #065f46; font-size: .78rem; font-weight: 600; cursor: pointer; transition: all .15s; }
+.btn-draw-zone:hover { background: #dcfce7; }
+body.dark-mode .btn-draw-zone { background: #064e3b; border-color: #10b981; color: #6ee7b7; }
+
+.part-ocr-status { font-size: .75rem; color: #555; background: rgba(0,0,0,.04); padding: 4px 7px; border-radius: 5px; font-style: italic; word-break: break-word; line-height: 1.4; }
+body.dark-mode .part-ocr-status { color: #bbb; background: rgba(255,255,255,.06); }
+.part-ocr-status.empty-status { color: #aaa; font-style: normal; }
+
+.part-transform-row { display: flex; align-items: center; gap: 6px; }
+.transform-label { font-size: .72rem; color: #888; white-space: nowrap; }
+.part-transform-select { flex: 1; padding: 4px 6px; border: 1.5px solid #d5d5d5; border-radius: 6px; font-size: .75rem; background: #fff; color: #2c3e50; }
+.part-transform-select:focus { outline: none; border-color: #3b82f6; }
+body.dark-mode .part-transform-select { background: #1a1a1a; border-color: #444; color: #e0e0e0; }
+
+/* ── Parte: búsqueda de texto ── */
+.search-field-row { display: flex; flex-direction: column; gap: 3px; }
+.search-field-label { font-size: .72rem; color: #888; font-weight: 600; }
+
+/* ── Palabra ancla ── */
+.anchor-section { margin-top: 4px; }
+.btn-anchor-toggle {
+    width: 100%; padding: 4px 8px; border-radius: 6px; border: 1.5px dashed #d0d0d0;
+    background: transparent; font-size: .73rem; font-weight: 600; cursor: pointer;
+    color: #888; transition: all .15s; text-align: left;
+}
+.btn-anchor-toggle:hover { border-color: #6366f1; color: #4f46e5; background: #eef2ff; }
+.btn-anchor-toggle.has-anchor { border-color: #6366f1; color: #4f46e5; background: #eef2ff; border-style: solid; }
+body.dark-mode .btn-anchor-toggle { border-color: #444; color: #888; }
+body.dark-mode .btn-anchor-toggle.has-anchor { border-color: #818cf8; color: #a5b4fc; background: #1e1b4b; }
+.anchor-config { margin-top: 5px; display: flex; flex-direction: column; gap: 4px; }
+.anchor-status { font-size: .72rem; padding: 2px 4px; }
+.anchor-status.found     { color: #16a34a; font-weight: 600; }
+.anchor-status.not-found { color: #dc2626; }
+.anchor-status.searching { color: #2563eb; }
+
+.rename-preview-box { background: #f8fafc; border: 1.5px solid #e2e8f0; border-radius: 7px; padding: 8px 10px; margin-top: 2px; }
+body.dark-mode .rename-preview-box { background: #1a1a1a; border-color: #333; }
+.rp-label { font-size: .72rem; color: #888; display: block; margin-bottom: 3px; }
+.rp-value { font-size: .82rem; font-weight: 600; color: #2c3e50; word-break: break-all; }
+body.dark-mode .rp-value { color: #e0e0e0; }
+.rp-value.empty { color: #bbb; font-weight: 400; font-style: italic; }
+
+/* Drawing indicator */
+.drawing-indicator { flex: 1; display: flex; align-items: center; gap: 8px; padding: 7px 12px; background: #fef3c7; border: 1.5px solid #f59e0b; border-radius: 8px; font-size: .8rem; color: #b45309; font-weight: 600; }
+body.dark-mode .drawing-indicator { background: #422006; border-color: #f59e0b; color: #fcd34d; }
+.btn-cancel-draw { margin-left: auto; padding: 3px 10px; border-radius: 5px; border: 1.5px solid #f59e0b; background: white; color: #b45309; font-size: .75rem; font-weight: 600; cursor: pointer; }
+.btn-cancel-draw:hover { background: #fef3c7; }
+body.dark-mode .btn-cancel-draw { background: #2a1000; color: #fcd34d; border-color: #f59e0b; }
+
+/* ── Modos del panel derecho ── */
+.list-mode-header {
+    display: flex; align-items: center; gap: 7px;
+    padding: 11px 14px 10px; border-bottom: 1px solid #e8e8e8;
+    background: #fafafa; flex-shrink: 0;
+}
+body.dark-mode .list-mode-header { background: #2a2a2a; border-color: #333; }
+.list-mode-title { font-size: .9rem; font-weight: 700; color: #2c3e50; }
+body.dark-mode .list-mode-title { color: #e0e0e0; }
+
+.btn-new-tpl {
+    margin-left: auto; padding: 5px 11px; border-radius: 7px; border: none;
+    background: #16a34a; color: white; font-size: .78rem; font-weight: 700;
+    cursor: pointer; transition: background .15s; flex-shrink: 0;
+}
+.btn-new-tpl:hover { background: #15803d; }
+
+.form-header {
+    display: flex; align-items: center; gap: 9px;
+    padding: 9px 14px 8px; border-bottom: 1px solid #e8e8e8;
+    background: #fafafa; flex-shrink: 0;
+}
+body.dark-mode .form-header { background: #2a2a2a; border-color: #333; }
+.btn-back {
+    padding: 4px 10px; border-radius: 7px; border: 1.5px solid #d0d0d0;
+    background: white; font-size: .8rem; font-weight: 600; cursor: pointer;
+    color: #555; transition: all .15s; flex-shrink: 0;
+}
+.btn-back:hover { border-color: #555; background: #f5f5f5; }
+body.dark-mode .btn-back { background: #333; border-color: #555; color: #ccc; }
+.form-title { font-size: .88rem; font-weight: 700; color: #2c3e50; }
+body.dark-mode .form-title { color: #e0e0e0; }
+
+/* panel footer */
+.panel-footer {
+    padding: 10px 14px; border-top: 1px solid #e8e8e8;
+    display: flex; gap: 8px; flex-shrink: 0; background: #fafafa;
+}
+body.dark-mode .panel-footer { background: #2a2a2a; border-color: #333; }
+</style>
+</head>
+<body class="window-body">
+
+<div class="layout">
+
+    <!-- ── Visor PDF ── -->
+    <div class="viewer-panel">
+
+        <div class="viewer-toolbar">
+            <button class="toolbar-btn" id="btn-load-pdf">📂 Cargar PDF de ejemplo</button>
+            <div class="page-nav" id="page-nav" style="display:none">
+                <button id="btn-prev-page" disabled>‹</button>
+                <span class="page-indicator" id="page-indicator">1 / 1</span>
+                <button id="btn-next-page" disabled>›</button>
+            </div>
+            <div class="zoom-controls" id="zoom-controls" style="display:none">
+                <button class="zoom-btn" id="btn-zoom-out" title="Alejar (−)">−</button>
+                <span class="zoom-label" id="zoom-label">100%</span>
+                <button class="zoom-btn" id="btn-zoom-in"  title="Acercar (+)">+</button>
+            </div>
+        </div>
+
+        <div class="tools-bar" id="tools-bar" style="display:none">
+            <button class="tool-btn id-tool" id="tool-id">
+                <span class="tool-label">🔍 Zona de identificación</span>
+                <span class="tool-hint">¿Qué texto identifica este documento?</span>
+            </button>
+            <div class="drawing-indicator" id="drawing-indicator" style="display:none">
+                ✏️ Dibuja la zona en el PDF — clic y arrastra
+                <button class="btn-cancel-draw" id="btn-cancel-draw">Cancelar</button>
+            </div>
+        </div>
+
+        <div class="canvas-area" id="canvas-area">
+            <div class="empty-state" id="empty-state">
+                <div class="empty-icon">📄</div>
+                <p>Carga un PDF de ejemplo para enseñarle a Zilo qué zonas leer</p>
+                <span class="load-hint">Haz clic en "Cargar PDF de ejemplo" arriba</span>
+            </div>
+            <div class="spinner" id="spinner" style="display:none">
+                <div class="spinner-ring"></div>
+                <span id="spinner-text">Cargando PDF...</span>
+            </div>
+            <div class="canvas-wrapper" id="canvas-wrapper" style="display:none">
+                <canvas id="pdf-canvas"></canvas>
+                <canvas id="draw-canvas"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Panel derecho ── -->
+    <div class="right-panel">
+
+        <!-- ══ VISTA: lista de plantillas ══ -->
+        <div id="view-list" style="display:flex;flex-direction:column;flex:1;overflow:hidden">
+            <div class="list-mode-header">
+                <span class="list-mode-title">🗂 Plantillas OCR</span>
+                <span class="count-badge" id="template-count" style="margin-left:6px">0</span>
+                <button class="btn-new-tpl" id="btn-new-template">+ Nueva plantilla</button>
+            </div>
+
+            <div class="panel-scroll" style="flex:1;overflow-y:auto">
+
+                <div id="templates-list">
+                    <div class="no-templates">Aún no has creado plantillas</div>
+                </div>
+
+                <!-- Patrones pendientes de formalizar -->
+                <div class="templates-section" id="pending-section" style="display:none">
+                    <div class="section-header" style="color:#b45309">
+                        🌱 Por aprender
+                        <span class="count-badge" id="pending-count" style="background:#fef3c7;color:#b45309">0</span>
+                    </div>
+                    <div style="font-size:.74rem;color:#888;margin-bottom:6px;line-height:1.4">
+                        Documentos renombrados manualmente que aún no tienen plantilla. Crea una para automatizarlos.
+                    </div>
+                    <div id="pending-list"></div>
+                </div>
+
+                <!-- Estadísticas del motor ML -->
+                <div class="templates-section" id="ml-stats-section">
+                    <div class="section-header" style="cursor:pointer" id="ml-stats-toggle">
+                        🤖 Aprendizaje automático
+                        <span class="count-badge" id="ml-total-docs" style="background:#ede9fe;color:#6d28d9">0 docs</span>
+                    </div>
+                    <div id="ml-stats-body" style="display:none">
+                        <div style="font-size:.74rem;color:#888;margin-bottom:8px;line-height:1.5">
+                            Naive Bayes + TF-IDF entrenados en tiempo real. Cada documento renombrado mejora la precisión.
+                        </div>
+                        <div id="ml-class-list"></div>
+                        <div style="display:flex;gap:6px;margin-top:8px">
+                            <button id="btn-ml-refresh" style="flex:1;padding:5px;border-radius:6px;border:1.5px solid #d0d0d0;background:transparent;font-size:.75rem;cursor:pointer;color:#555">↺ Actualizar</button>
+                            <button id="btn-ml-reset"   style="flex:1;padding:5px;border-radius:6px;border:1.5px solid #fca5a5;background:transparent;font-size:.75rem;cursor:pointer;color:#dc2626">🗑 Borrar modelo</button>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- Footer: modo lista -->
+            <div class="panel-footer">
+                <button class="btn-done" id="btn-close-list" style="flex:1">Cerrar</button>
+            </div>
+        </div>
+
+        <!-- ══ VISTA: formulario nueva / editar plantilla ══ -->
+        <div id="view-form" style="display:none;flex-direction:column;flex:1;overflow:hidden">
+            <div class="form-header">
+                <button class="btn-back" id="btn-back-to-list">← Volver</button>
+                <span class="form-title">Nueva plantilla</span>
+            </div>
+
+            <div class="panel-scroll" style="flex:1;overflow-y:auto">
+
+                <!-- Nombre de la plantilla -->
+                <div>
+                    <div class="field-label">Nombre de la plantilla</div>
+                    <input type="text" id="template-name" class="field-input"
+                           placeholder="Ej: Facturas Endesa, Recibos Gas...">
+                </div>
+
+                <!-- Zona de identificación -->
+                <div class="zone-card id-zone" id="zone-id-card">
+                    <div class="zone-header">
+                        <span class="zone-dot id-dot"></span>
+                        Zona de identificación
+                        <span class="zone-status-icon" id="id-zone-icon">⬜</span>
+                    </div>
+                    <div class="zone-text-preview empty" id="id-zone-preview">
+                        Selecciona 🔍 y dibuja sobre el texto que identifique el documento (nombre empresa, membrete…)
+                    </div>
+                    <div class="zone-page-info" id="id-zone-page" style="display:none"></div>
+                    <div class="ocr-running" id="id-ocr-running" style="display:none">
+                        <div class="ocr-spinner"></div> Analizando zona...
+                    </div>
+                </div>
+
+                <!-- Formato de nombre del archivo -->
+                <div>
+                    <div class="field-label" style="margin-bottom:6px">Formato del nombre del archivo</div>
+                    <div class="parts-builder" id="rename-parts-list">
+                        <div class="parts-empty-hint">Añade partes para componer el nombre</div>
+                    </div>
+                    <div class="parts-add-row">
+                        <button class="btn-add-part text-part"   id="btn-add-text">+ Texto fijo</button>
+                        <button class="btn-add-part ocr-part"    id="btn-add-ocr">+ Zona OCR</button>
+                        <button class="btn-add-part search-part" id="btn-add-search">+ Búsqueda</button>
+                    </div>
+                    <div class="rename-preview-box" id="rename-preview-box" style="display:none">
+                        <span class="rp-label">Vista previa del nombre:</span>
+                        <span class="rp-value empty" id="rp-value">—</span>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- Error de validación inline (reemplaza alert) -->
+            <div id="form-save-error" style="display:none;margin:0 14px 0;padding:8px 11px;
+                background:#fee2e2;border:1px solid #fca5a5;border-radius:7px;
+                font-size:.77rem;color:#991b1b;line-height:1.5;flex-shrink:0"></div>
+
+            <!-- Footer: modo formulario -->
+            <div class="panel-footer">
+                <button class="btn-cancel-win" id="btn-cancel-form" style="flex:1">Cancelar</button>
+                <button class="btn-done"       id="btn-done-window" style="flex:2">💾 Guardar</button>
+            </div>
+        </div>
+
+    </div>
+
+</div>
+
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+let pdfDoc       = null;
+let currentPage  = 0;           // 0-indexed
+let activeTool   = null;        // 'id' | 'ocr-part'
+let isDrawing    = false;
+let drawStart    = { x: 0, y: 0 };
+let drawCurrent  = { x: 0, y: 0 };
+let idZone       = null;        // { page, rect:{x,y,w,h}, text }
+
+// Parts del formato de nombre
+let renameParts   = [];         // [{ id, type:'text'|'ocr'|'text-search', ... }]
+let pendingPartId = null;       // id de la zona OCR esperando dibujarse
+
+function genPartId() {
+    return 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+}
+
+// Zoom
+let userZoom    = 1.0;
+const ZOOM_MIN  = 0.3;
+const ZOOM_MAX  = 5.0;
+const ZOOM_STEP = 0.2;
+
+// Pan (arrastrar con clic derecho)
+let isPanning  = false;
+let panStartX  = 0;
+let panStartY  = 0;
+let panScrollX = 0;
+let panScrollY = 0;
+
+const pdfCanvas     = document.getElementById('pdf-canvas');
+const drawCanvas    = document.getElementById('draw-canvas');
+const canvasWrapper = document.getElementById('canvas-wrapper');
+const canvasArea    = document.getElementById('canvas-area');
+const emptyState    = document.getElementById('empty-state');
+const spinnerEl     = document.getElementById('spinner');
+const spinnerText   = document.getElementById('spinner-text');
+const pageNav       = document.getElementById('page-nav');
+const toolsBar      = document.getElementById('tools-bar');
+const pageIndicator = document.getElementById('page-indicator');
+
+// ── Tema ──────────────────────────────────────────────────────────────────────
+window.ocrZonalAPI.onThemeChanged(t => document.body.classList.toggle('dark-mode', t === 'dark'));
+
+// ── Modos del panel derecho ───────────────────────────────────────────────────
+function showListMode() {
+    document.getElementById('view-list').style.display = 'flex';
+    document.getElementById('view-form').style.display = 'none';
+}
+
+function showFormMode() {
+    document.getElementById('view-list').style.display = 'none';
+    const vf = document.getElementById('view-form');
+    vf.style.display = 'flex';
+    setTimeout(() => document.getElementById('template-name').focus(), 50);
+}
+
+function resetForm() {
+    document.getElementById('template-name').value = '';
+    idZone = null; renameParts = []; pendingPartId = null;
+    updateIdUI(); renderParts(); renderOverlay();
+    if (activeTool) { setTool(null); }
+    document.getElementById('drawing-indicator').style.display = 'none';
+    hideFormError();
+    checkSaveEnabled();
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', () => {
+    loadTemplatesList();
+
+    // Visor PDF
+    document.getElementById('btn-load-pdf').addEventListener('click', selectAndLoadPDF);
+    document.getElementById('btn-prev-page').addEventListener('click', () => navigatePage(-1));
+    document.getElementById('btn-next-page').addEventListener('click', () => navigatePage(1));
+    document.getElementById('btn-zoom-in').addEventListener('click',  () => adjustZoom(+ZOOM_STEP));
+    document.getElementById('btn-zoom-out').addEventListener('click', () => adjustZoom(-ZOOM_STEP));
+
+    // Herramientas
+    document.getElementById('tool-id').addEventListener('click', () => setTool('id'));
+    document.getElementById('btn-cancel-draw').addEventListener('click', cancelDrawingForPart);
+
+    // Parts
+    document.getElementById('btn-add-text').addEventListener('click', addTextPart);
+    document.getElementById('btn-add-ocr').addEventListener('click', addOcrPart);
+    document.getElementById('btn-add-search').addEventListener('click', addSearchPart);
+    document.getElementById('template-name').addEventListener('input', checkSaveEnabled);
+
+    // Modos del panel
+    document.getElementById('btn-new-template').addEventListener('click', () => {
+        resetForm();
+        showFormMode();
+    });
+    document.getElementById('btn-back-to-list').addEventListener('click', handleBackToList);
+    document.getElementById('btn-cancel-form').addEventListener('click', handleBackToList);
+    document.getElementById('btn-close-list').addEventListener('click', () => window.ocrZonalAPI.closeWindow());
+
+    // Guardar plantilla
+    document.getElementById('btn-done-window').addEventListener('click', handleDoneButton);
+
+    // Canvas
+    drawCanvas.addEventListener('mousedown', onDrawStart);
+    drawCanvas.addEventListener('mousemove', onDrawMove);
+    drawCanvas.addEventListener('mouseup',   onDrawEnd);
+    drawCanvas.addEventListener('mouseleave', () => { if (isDrawing) onDrawEnd(); });
+
+    canvasArea.addEventListener('wheel', (e) => {
+        if (!pdfDoc) return;
+        e.preventDefault();
+        const delta = e.deltaY < 0 ? +ZOOM_STEP : -ZOOM_STEP;
+        adjustZoom(delta, e.clientX, e.clientY);
+    }, { passive: false });
+
+    canvasArea.addEventListener('mousedown',   onPanStart);
+    canvasArea.addEventListener('mousemove',   onPanMove);
+    canvasArea.addEventListener('mouseup',     onPanEnd);
+    canvasArea.addEventListener('mouseleave',  onPanEnd);
+    canvasArea.addEventListener('contextmenu', e => e.preventDefault());
+
+    // Panel ML: toggle + acciones
+    document.getElementById('ml-stats-toggle').addEventListener('click', async () => {
+        const body = document.getElementById('ml-stats-body');
+        const open = body.style.display === 'none';
+        body.style.display = open ? 'block' : 'none';
+        if (open) await loadMLStats();
+    });
+    document.getElementById('btn-ml-refresh').addEventListener('click', loadMLStats);
+    document.getElementById('btn-ml-reset').addEventListener('click', async () => {
+        if (!confirm('¿Borrar TODOS los datos del modelo ML? Esto no se puede deshacer.')) return;
+        await window.ocrZonalAPI.mlReset();
+        document.getElementById('ml-total-docs').textContent = '0 docs';
+        document.getElementById('ml-class-list').innerHTML =
+            '<div style="font-size:.76rem;color:#bbb;padding:6px 0">Modelo borrado.</div>';
+    });
+});
+
+// ── Volver a la lista ─────────────────────────────────────────────────────────
+function handleBackToList() {
+    const name   = document.getElementById('template-name').value.trim();
+    const hasAny = name || idZone || renameParts.length;
+    if (hasAny) {
+        const discard = confirm('¿Descartar los cambios? La plantilla no se guardará.');
+        if (!discard) return;
+    }
+    if (pendingPartId) cancelDrawingForPart();
+    resetForm();
+    showListMode();
+}
+
+// ── Carga PDF ─────────────────────────────────────────────────────────────────
+async function selectAndLoadPDF() {
+    const result = await window.ocrZonalAPI.selectPdf();
+    if (!result?.success || !result.files?.length) return;
+    await loadPDF(result.files[0]);
+}
+
+async function loadPDF(filePath) {
+    showSpinner('Cargando PDF...');
+    try {
+        const result = await window.ocrZonalAPI.readPdf(filePath);
+        if (!result.success) throw new Error(result.error || 'No se pudo leer el PDF');
+
+        pdfDoc = await pdfjsLib.getDocument({ data: result.data }).promise;
+        currentPage = 0;
+        userZoom = 1.0;
+
+        emptyState.style.display    = 'none';
+        canvasWrapper.style.display = 'inline-block';
+        pageNav.style.display       = 'flex';
+        toolsBar.style.display      = 'flex';
+        document.getElementById('zoom-controls').style.display = 'flex';
+        updateZoomLabel();
+
+        await renderPage(currentPage);
+        updatePageNav();
+
+        // Re-verificar anclas de partes ya definidas con el nuevo PDF
+        for (const part of renameParts) {
+            if (part.type === 'ocr' && part.anchor?.text) {
+                updateAnchorStatus(part.id);
+            }
+        }
+    } catch (e) {
+        showEmpty();
+        alert('Error al cargar el PDF: ' + e.message);
+    }
+}
+
+async function renderPage(pageIndex) {
+    showSpinner('Renderizando...');
+    try {
+        const page    = await pdfDoc.getPage(pageIndex + 1);
+        const vp1     = page.getViewport({ scale: 1 });
+
+        const maxW    = canvasArea.clientWidth  - 40;
+        const maxH    = canvasArea.clientHeight - 40;
+        const baseScale = Math.min(maxW / vp1.width, maxH / vp1.height, 2.0);
+        const scale   = baseScale * userZoom;
+        const vp      = page.getViewport({ scale });
+        const dpr     = window.devicePixelRatio || 1;
+
+        pdfCanvas.width  = vp.width  * dpr;
+        pdfCanvas.height = vp.height * dpr;
+        pdfCanvas.style.width  = vp.width  + 'px';
+        pdfCanvas.style.height = vp.height + 'px';
+
+        drawCanvas.width  = vp.width  * dpr;
+        drawCanvas.height = vp.height * dpr;
+        drawCanvas.style.width  = vp.width  + 'px';
+        drawCanvas.style.height = vp.height + 'px';
+
+        const ctx = pdfCanvas.getContext('2d');
+        ctx.scale(dpr, dpr);
+        await page.render({ canvasContext: ctx, viewport: vp }).promise;
+
+        renderOverlay();
+        hideSpinner();
+    } catch (e) {
+        hideSpinner();
+    }
+}
+
+// ── Zoom ──────────────────────────────────────────────────────────────────────
+let _zoomBusy = false;
+
+async function adjustZoom(delta, focalClientX, focalClientY) {
+    if (!pdfDoc) return;
+
+    // Capturar fracción del canvas bajo el cursor ANTES de cambiar el zoom
+    let fracX = 0.5, fracY = 0.5;
+    let mouseInAreaX = 0, mouseInAreaY = 0;
+    let useFocal = false;
+
+    if (focalClientX != null && canvasWrapper.style.display !== 'none') {
+        const areaRect    = canvasArea.getBoundingClientRect();
+        const wrapperRect = canvasWrapper.getBoundingClientRect();
+        mouseInAreaX = focalClientX - areaRect.left;
+        mouseInAreaY = focalClientY - areaRect.top;
+        // Solo zoom al cursor si el ratón está sobre el canvas
+        if (focalClientX >= wrapperRect.left && focalClientX <= wrapperRect.right &&
+            focalClientY >= wrapperRect.top  && focalClientY <= wrapperRect.bottom) {
+            fracX    = (focalClientX - wrapperRect.left) / wrapperRect.width;
+            fracY    = (focalClientY - wrapperRect.top)  / wrapperRect.height;
+            useFocal = true;
+        }
+    }
+
+    // Evitar renders solapados: acumular delta si ya hay uno en curso
+    if (_zoomBusy) {
+        userZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, +(userZoom + delta).toFixed(2)));
+        updateZoomLabel();
+        return;
+    }
+
+    _zoomBusy = true;
+    userZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, +(userZoom + delta).toFixed(2)));
+    updateZoomLabel();
+
+    await renderPage(currentPage);
+
+    // Tras renderizar, ajustar scroll para que el punto focal quede bajo el cursor
+    if (useFocal) {
+        const areaRect       = canvasArea.getBoundingClientRect();
+        const newWrapperRect = canvasWrapper.getBoundingClientRect();
+        // Posición del wrapper en coordenadas del contenido desplazable
+        const wrapperInScrollX = newWrapperRect.left - areaRect.left + canvasArea.scrollLeft;
+        const wrapperInScrollY = newWrapperRect.top  - areaRect.top  + canvasArea.scrollTop;
+        // El punto (fracX, fracY) del canvas debe quedar en (mouseInAreaX, mouseInAreaY)
+        canvasArea.scrollLeft = wrapperInScrollX + fracX * newWrapperRect.width  - mouseInAreaX;
+        canvasArea.scrollTop  = wrapperInScrollY + fracY * newWrapperRect.height - mouseInAreaY;
+    }
+
+    _zoomBusy = false;
+}
+
+function updateZoomLabel() {
+    document.getElementById('zoom-label').textContent = Math.round(userZoom * 100) + '%';
+}
+
+// ── Pan (clic derecho + arrastrar) ────────────────────────────────────────────
+function onPanStart(e) {
+    if (e.button !== 2 || !pdfDoc) return;
+    isPanning  = true;
+    panStartX  = e.clientX;
+    panStartY  = e.clientY;
+    panScrollX = canvasArea.scrollLeft;
+    panScrollY = canvasArea.scrollTop;
+    canvasArea.style.cursor = 'grabbing';
+    e.preventDefault();
+}
+
+function onPanMove(e) {
+    if (!isPanning) return;
+    canvasArea.scrollLeft = panScrollX - (e.clientX - panStartX);
+    canvasArea.scrollTop  = panScrollY - (e.clientY - panStartY);
+}
+
+function onPanEnd(e) {
+    if (!isPanning) return;
+    isPanning = false;
+    canvasArea.style.cursor = '';
+}
+
+// ── Navegación páginas ────────────────────────────────────────────────────────
+function navigatePage(delta) {
+    if (!pdfDoc) return;
+    const next = currentPage + delta;
+    if (next < 0 || next >= pdfDoc.numPages) return;
+    currentPage = next;
+    updatePageNav();
+    renderPage(currentPage);
+}
+
+function updatePageNav() {
+    if (!pdfDoc) return;
+    pageIndicator.textContent = `${currentPage + 1} / ${pdfDoc.numPages}`;
+    document.getElementById('btn-prev-page').disabled = currentPage === 0;
+    document.getElementById('btn-next-page').disabled = currentPage === pdfDoc.numPages - 1;
+}
+
+// ── Herramientas ──────────────────────────────────────────────────────────────
+function setTool(tool) {
+    activeTool = (activeTool === tool) ? null : tool;
+    document.getElementById('tool-id').classList.toggle('active', activeTool === 'id');
+    drawCanvas.style.cursor = activeTool ? 'crosshair' : 'default';
+}
+
+function startDrawingForPart(partId) {
+    pendingPartId = partId;
+    activeTool    = 'ocr-part';
+    drawCanvas.style.cursor = 'crosshair';
+    document.getElementById('tool-id').classList.remove('active');
+    document.getElementById('drawing-indicator').style.display = 'flex';
+    renderParts();
+}
+
+function cancelDrawingForPart() {
+    pendingPartId = null;
+    activeTool    = null;
+    drawCanvas.style.cursor = 'default';
+    document.getElementById('drawing-indicator').style.display = 'none';
+    renderParts();
+}
+
+// ── Dibujo de rectángulo ──────────────────────────────────────────────────────
+function getRelPos(e) {
+    const r = drawCanvas.getBoundingClientRect();
+    return {
+        x: Math.max(0, Math.min(1, (e.clientX - r.left)  / r.width)),
+        y: Math.max(0, Math.min(1, (e.clientY - r.top)   / r.height))
+    };
+}
+
+function onDrawStart(e) {
+    if (e.button !== 0 || !activeTool || !pdfDoc) return;
+    isDrawing   = true;
+    drawStart   = getRelPos(e);
+    drawCurrent = { ...drawStart };
+}
+
+function onDrawMove(e) {
+    if (!isDrawing) return;
+    drawCurrent = getRelPos(e);
+    renderOverlay(true);
+}
+
+async function onDrawEnd(e) {
+    if (!isDrawing) return;
+    isDrawing = false;
+    if (e) drawCurrent = getRelPos(e);
+
+    const rect = normRect(drawStart, drawCurrent);
+    if (rect.w < 0.01 || rect.h < 0.01) { renderOverlay(); return; }
+
+    if (activeTool === 'id') {
+        idZone = { page: currentPage, rect, text: '' };
+        document.getElementById('id-ocr-running').style.display = 'flex';
+        idZone.text = await ocrZone(currentPage, rect);
+        document.getElementById('id-ocr-running').style.display = 'none';
+        updateIdUI();
+        renderOverlay();
+        checkSaveEnabled();
+
+    } else if (activeTool === 'ocr-part' && pendingPartId) {
+        const pid  = pendingPartId;
+        pendingPartId = null;
+        activeTool    = null;
+        drawCanvas.style.cursor = 'default';
+        document.getElementById('drawing-indicator').style.display = 'none';
+
+        const part = renameParts.find(p => p.id === pid);
+        if (part) {
+            part.page     = currentPage;
+            part.rect     = rect;
+            part._preview = '';
+            part._loading = true;
+            renderParts();
+            renderOverlay();
+
+            const text = await ocrZone(currentPage, rect);
+            const p2   = renameParts.find(p => p.id === pid);
+            if (p2) { p2._preview = text; p2._loading = false; }
+            renderParts();
+            updateRenamePreview();
+        }
+        checkSaveEnabled();
+    }
+}
+
+function normRect(a, b) {
+    return { x: Math.min(a.x,b.x), y: Math.min(a.y,b.y), w: Math.abs(b.x-a.x), h: Math.abs(b.y-a.y) };
+}
+
+// ── OCR de zona recortada ─────────────────────────────────────────────────────
+async function ocrZone(pageIndex, nr) {
+    try {
+        const page = await pdfDoc.getPage(pageIndex + 1);
+        const vp   = page.getViewport({ scale: 3.0 });
+
+        const full = document.createElement('canvas');
+        full.width = vp.width; full.height = vp.height;
+        await page.render({ canvasContext: full.getContext('2d'), viewport: vp }).promise;
+
+        const zx = nr.x * vp.width,  zy = nr.y * vp.height;
+        const zw = nr.w * vp.width,  zh = nr.h * vp.height;
+        const crop = document.createElement('canvas');
+        crop.width  = Math.max(1, Math.round(zw));
+        crop.height = Math.max(1, Math.round(zh));
+        crop.getContext('2d').drawImage(full, zx, zy, zw, zh, 0, 0, zw, zh);
+
+        const { data } = await Tesseract.recognize(crop.toDataURL('image/png'), 'spa');
+        return data.text.replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim();
+    } catch (e) {
+        return '';
+    }
+}
+
+// ── Overlay de zonas ──────────────────────────────────────────────────────────
+function renderOverlay(live = false) {
+    const dpr = window.devicePixelRatio || 1;
+    const ctx = drawCanvas.getContext('2d');
+    ctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+    const W = drawCanvas.width / dpr, H = drawCanvas.height / dpr;
+    ctx.save(); ctx.scale(dpr, dpr);
+
+    if (idZone && idZone.page === currentPage)
+        drawRect(ctx, idZone.rect, W, H, '#f59e0b', 'rgba(245,158,11,0.13)');
+
+    let ocrIdx = 0;
+    renameParts.forEach(part => {
+        if (part.type !== 'ocr') return;
+        ocrIdx++;
+        if (part.rect && part.page === currentPage) {
+            drawRect(ctx, part.rect, W, H, '#10b981', 'rgba(16,185,129,0.13)');
+            const lx = part.rect.x * W + 4;
+            const ly = Math.max(12, part.rect.y * H - 3);
+            ctx.font = 'bold 10px -apple-system, sans-serif';
+            ctx.fillStyle = '#fff';
+            const label = part.label ? `OCR ${ocrIdx}: ${part.label}` : `OCR ${ocrIdx}`;
+            const tw = ctx.measureText(label).width;
+            ctx.fillRect(lx - 2, ly - 10, tw + 6, 13);
+            ctx.fillStyle = '#065f46';
+            ctx.fillText(label, lx + 1, ly);
+        }
+    });
+
+    if (live && isDrawing) {
+        const r = normRect(drawStart, drawCurrent);
+        ctx.strokeStyle = activeTool === 'id' ? '#f59e0b' : '#10b981';
+        ctx.setLineDash([5, 4]);
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(r.x*W, r.y*H, r.w*W, r.h*H);
+    }
+    ctx.restore();
+}
+
+function drawRect(ctx, r, W, H, stroke, fill) {
+    ctx.fillStyle = fill; ctx.strokeStyle = stroke;
+    ctx.lineWidth = 2; ctx.setLineDash([]);
+    ctx.fillRect(r.x*W, r.y*H, r.w*W, r.h*H);
+    ctx.strokeRect(r.x*W, r.y*H, r.w*W, r.h*H);
+}
+
+// ── UI zonas ──────────────────────────────────────────────────────────────────
+function updateIdUI() {
+    const filled = !!idZone;
+    document.getElementById('zone-id-card').classList.toggle('filled', filled);
+    document.getElementById('id-zone-icon').textContent = filled ? '✅' : '⬜';
+    const prev = document.getElementById('id-zone-preview');
+    prev.classList.toggle('empty', !filled);
+    prev.textContent = filled
+        ? (idZone.text || '(sin texto detectado — amplía la zona)')
+        : 'Selecciona 🔍 y dibuja sobre el texto que identifique el documento (nombre empresa, membrete…)';
+    const pg = document.getElementById('id-zone-page');
+    pg.style.display = filled ? 'block' : 'none';
+    if (filled) pg.textContent = `Página ${idZone.page + 1}`;
+}
+
+// ── Parts: añadir ─────────────────────────────────────────────────────────────
+function addTextPart() {
+    renameParts.push({ id: genPartId(), type: 'text', value: '' });
+    renderParts();
+    checkSaveEnabled();
+}
+
+function addOcrPart() {
+    if (!pdfDoc) { alert('Carga primero un PDF de ejemplo.'); return; }
+    const part = { id: genPartId(), type: 'ocr', label: '', transform: 'none', page: null, rect: null, _preview: '', _loading: false };
+    renameParts.push(part);
+    renderParts();
+    startDrawingForPart(part.id);
+    checkSaveEnabled();
+}
+
+function addSearchPart() {
+    const part = { id: genPartId(), type: 'text-search', label: '', before: '', after: '', transform: 'none' };
+    renameParts.push(part);
+    renderParts();
+    checkSaveEnabled();
+}
+
+// ── Parts: renderizado ────────────────────────────────────────────────────────
+function renderParts() {
+    const container = document.getElementById('rename-parts-list');
+    if (!renameParts.length) {
+        container.innerHTML = '<div class="parts-empty-hint">Añade partes para componer el nombre del archivo</div>';
+        updateRenamePreview();
+        return;
+    }
+
+    container.innerHTML = '';
+    let ocrIdx = 0;
+
+    renameParts.forEach((part) => {
+        const card = document.createElement('div');
+        const drawingThis = (part.id === pendingPartId);
+
+        if (part.type === 'text') {
+            // ── Texto fijo ────────────────────────────────────────────────────
+            card.className = 'part-card text-part-card';
+            card.innerHTML = `
+                <div class="part-header">
+                    <span class="part-badge text-badge">📝 Texto fijo</span>
+                    <button class="part-delete" data-id="${part.id}" title="Eliminar">✕</button>
+                </div>
+                <input type="text" class="field-input" style="font-size:.82rem;padding:5px 8px"
+                    placeholder="Texto estático (ej: PEDIDO , / , - …)"
+                    value="${esc(part.value || '')}">
+            `;
+            card.querySelector('input').addEventListener('input', e => {
+                const p = renameParts.find(x => x.id === part.id);
+                if (p) { p.value = e.target.value; updateRenamePreview(); }
+                checkSaveEnabled();
+            });
+
+        } else if (part.type === 'text-search') {
+            // ── Búsqueda de texto ─────────────────────────────────────────────
+            card.className = 'part-card search-part-card';
+            card.innerHTML = `
+                <div class="part-header">
+                    <span class="part-badge search-badge">🔎 Búsqueda de texto</span>
+                    <button class="part-delete" data-id="${part.id}" title="Eliminar">✕</button>
+                </div>
+                <input type="text" class="field-input part-label-inp"
+                    style="font-size:.78rem;padding:5px 8px"
+                    placeholder="Etiqueta (ej: Número pedido, Proveedor…)"
+                    value="${esc(part.label || '')}">
+                <div style="font-size:.72rem;color:#6366f1;background:#eef2ff;padding:5px 8px;border-radius:6px;line-height:1.4">
+                    💡 Busca el texto que aparezca justo después de una palabra clave en cualquier parte de la página. Ideal para etiquetas o sellos de posición variable.
+                </div>
+                <div class="search-field-row">
+                    <span class="search-field-label">Texto ANTES del dato (obligatorio):</span>
+                    <input type="text" class="field-input search-before-inp"
+                        style="font-size:.78rem;padding:5px 8px"
+                        placeholder="Ej: PEDIDO NÚM: · Nº Factura · RMA:"
+                        value="${esc(part.before || '')}">
+                </div>
+                <div class="search-field-row">
+                    <span class="search-field-label">Texto DESPUÉS del dato (opcional — para delimitar):</span>
+                    <input type="text" class="field-input search-after-inp"
+                        style="font-size:.78rem;padding:5px 8px"
+                        placeholder="Deja vacío para leer hasta el final de la línea"
+                        value="${esc(part.after || '')}">
+                </div>
+                <div class="part-transform-row">
+                    <span class="transform-label">Transformar:</span>
+                    <select class="part-transform-select" data-id="${part.id}">
+                        <option value="none"${(part.transform||'none')==='none'?' selected':''}>Sin cambios</option>
+                        <option value="strip_zeros"${part.transform==='strip_zeros'?' selected':''}>Quitar ceros iniciales (00008016 → 8016)</option>
+                        <option value="upper"${part.transform==='upper'?' selected':''}>TODO EN MAYÚSCULAS</option>
+                        <option value="lower"${part.transform==='lower'?' selected':''}>todo en minúsculas</option>
+                        <option value="replace_slash"${part.transform==='replace_slash'?' selected':''}>Reemplazar / por -</option>
+                        <option value="numbers_only"${part.transform==='numbers_only'?' selected':''}>Solo números</option>
+                    </select>
+                </div>
+            `;
+            card.querySelector('.part-label-inp').addEventListener('input', e => {
+                const p = renameParts.find(x => x.id === part.id);
+                if (p) p.label = e.target.value;
+            });
+            card.querySelector('.search-before-inp').addEventListener('input', e => {
+                const p = renameParts.find(x => x.id === part.id);
+                if (p) { p.before = e.target.value; updateRenamePreview(); }
+                checkSaveEnabled();
+            });
+            card.querySelector('.search-after-inp').addEventListener('input', e => {
+                const p = renameParts.find(x => x.id === part.id);
+                if (p) p.after = e.target.value;
+            });
+            card.querySelector('.part-transform-select').addEventListener('change', e => {
+                const p = renameParts.find(x => x.id === part.id);
+                if (p) { p.transform = e.target.value; updateRenamePreview(); }
+            });
+
+        } else {
+            // ── Zona OCR ──────────────────────────────────────────────────────
+            ocrIdx++;
+            const myIdx   = ocrIdx;
+            const hasZone = part.rect != null;
+            card.className = `part-card ocr-part-card${drawingThis ? ' drawing' : ''}`;
+            card.innerHTML = `
+                <div class="part-header">
+                    <span class="part-badge ocr-badge">🔍 Zona OCR ${myIdx}</span>
+                    <button class="part-delete" data-id="${part.id}" title="Eliminar">✕</button>
+                </div>
+                <input type="text" class="field-input" style="font-size:.78rem;padding:5px 8px"
+                    placeholder="Etiqueta (ej: Número pedido, Fecha…)"
+                    value="${esc(part.label || '')}">
+                ${drawingThis
+                    ? `<div style="font-size:.77rem;color:#b45309;font-weight:600;padding:4px 2px">⏳ Dibuja la zona en el PDF…</div>`
+                    : `<button class="btn-draw-zone" data-id="${part.id}">${hasZone ? '↺ Redibujar zona' : '✏️ Dibujar zona en el PDF'}</button>`
+                }
+                ${hasZone && !drawingThis ? `
+                    <div class="part-ocr-status${part._preview ? '' : ' empty-status'}">
+                        ${part._loading
+                            ? '<span style="color:#3b82f6;font-style:normal">⏳ Analizando zona…</span>'
+                            : (part._preview ? `"${esc(part._preview)}"` : '(sin texto detectado — amplía la zona)')}
+                    </div>
+                    <div class="part-transform-row">
+                        <span class="transform-label">Transformar:</span>
+                        <select class="part-transform-select" data-id="${part.id}">
+                            <option value="none"${(part.transform||'none')==='none'?' selected':''}>Sin cambios</option>
+                            <option value="strip_zeros"${part.transform==='strip_zeros'?' selected':''}>Quitar ceros iniciales (00008016 → 8016)</option>
+                            <option value="upper"${part.transform==='upper'?' selected':''}>TODO EN MAYÚSCULAS</option>
+                            <option value="lower"${part.transform==='lower'?' selected':''}>todo en minúsculas</option>
+                            <option value="replace_slash"${part.transform==='replace_slash'?' selected':''}>Reemplazar / por -</option>
+                            <option value="numbers_only"${part.transform==='numbers_only'?' selected':''}>Solo números</option>
+                        </select>
+                    </div>
+                    <div class="anchor-section">
+                        <button class="btn-anchor-toggle ${part.anchor?.text ? 'has-anchor' : ''}"
+                                id="anchor-btn-${part.id}"
+                                data-id="${part.id}">
+                            ${part.anchor?.text ? `🎯 Ancla: ${esc(part.anchor.text)}` : '🎯 Añadir ancla de posición'}
+                        </button>
+                        <div class="anchor-config" id="anchor-config-${part.id}"
+                             style="${part.anchor?.text ? 'display:block' : 'display:none'}">
+                            <input type="text" class="field-input"
+                                   id="anchor-inp-${part.id}"
+                                   style="font-size:.78rem;padding:5px 8px"
+                                   placeholder="Palabra/frase siempre visible cerca del dato (ej: PEDIDO Nº)"
+                                   value="${esc(part.anchor?.text || '')}">
+                            <div class="anchor-status ${part.anchor?.refY != null ? 'found' : ''}"
+                                 id="anchor-status-${part.id}">
+                                ${part.anchor?.refY != null
+                                    ? `✅ Encontrada al ${Math.round(part.anchor.refY * 100)}% de la página`
+                                    : (part.anchor?.text ? '⚠️ Carga el PDF para verificar' : '')}
+                            </div>
+                        </div>
+                    </div>` : ''}
+            `;
+            card.querySelector('.btn-draw-zone')?.addEventListener('click', () => startDrawingForPart(part.id));
+            card.querySelector('.part-transform-select')?.addEventListener('change', e => {
+                const p = renameParts.find(x => x.id === part.id);
+                if (p) { p.transform = e.target.value; updateRenamePreview(); }
+            });
+            card.querySelector('input')?.addEventListener('input', e => {
+                const p = renameParts.find(x => x.id === part.id);
+                if (p) p.label = e.target.value;
+                renderOverlay();
+            });
+            // Ancla
+            document.getElementById(`anchor-btn-${part.id}`)?.addEventListener('click', () => toggleAnchorSection(part.id));
+            const anchorInp = document.getElementById(`anchor-inp-${part.id}`);
+            if (anchorInp) {
+                let _anchorTimer;
+                anchorInp.addEventListener('input', () => {
+                    clearTimeout(_anchorTimer);
+                    _anchorTimer = setTimeout(() => updateAnchorStatus(part.id), 600);
+                });
+            }
+        }
+
+        card.querySelector('.part-delete').addEventListener('click', () => {
+            if (pendingPartId === part.id) cancelDrawingForPart();
+            renameParts = renameParts.filter(x => x.id !== part.id);
+            renderParts();
+            renderOverlay();
+            checkSaveEnabled();
+        });
+
+        container.appendChild(card);
+    });
+
+    updateRenamePreview();
+}
+
+// ── Palabra ancla ─────────────────────────────────────────────────────────────
+async function _findAnchorInPdf(anchorText, pageIndex) {
+    if (!pdfDoc || !anchorText?.trim()) return null;
+    try {
+        const page       = await pdfDoc.getPage((pageIndex || 0) + 1);
+        const content    = await page.getTextContent();
+        const vp1        = page.getViewport({ scale: 1 });
+        const pageHeight = vp1.viewBox ? vp1.viewBox[3] : (vp1.height / vp1.scale);
+        const lower      = anchorText.toLowerCase().trim();
+
+        const lineMap = {};
+        for (const item of content.items) {
+            if (!item.str?.trim()) continue;
+            const yKey = Math.round(item.transform[5] / 5) * 5;
+            if (!lineMap[yKey]) lineMap[yKey] = { rawY: item.transform[5], text: '' };
+            lineMap[yKey].text += item.str;
+        }
+        for (const line of Object.values(lineMap)) {
+            if (line.text.toLowerCase().includes(lower)) {
+                return Math.max(0, Math.min(1, 1 - line.rawY / pageHeight));
+            }
+        }
+        for (const item of content.items) {
+            if (item.str?.toLowerCase().includes(lower)) {
+                return Math.max(0, Math.min(1, 1 - item.transform[5] / pageHeight));
+            }
+        }
+    } catch (e) { console.warn('[Anchor]', e); }
+    return null;
+}
+
+async function updateAnchorStatus(partId) {
+    const part      = renameParts.find(p => p.id === partId);
+    const inputEl   = document.getElementById(`anchor-inp-${partId}`);
+    const statusEl  = document.getElementById(`anchor-status-${partId}`);
+    const toggleBtn = document.getElementById(`anchor-btn-${partId}`);
+    if (!part || !inputEl) return;
+
+    const text = inputEl.value.trim();
+    if (!text) {
+        part.anchor = null;
+        if (statusEl) { statusEl.textContent = ''; statusEl.className = 'anchor-status'; }
+        if (toggleBtn) { toggleBtn.textContent = '🎯 Añadir ancla de posición'; toggleBtn.classList.remove('has-anchor'); }
+        return;
+    }
+
+    if (!part.anchor) part.anchor = {};
+    part.anchor.text = text;
+    if (toggleBtn) { toggleBtn.textContent = `🎯 Ancla: ${text}`; toggleBtn.classList.add('has-anchor'); }
+
+    if (!pdfDoc) {
+        if (statusEl) { statusEl.textContent = 'Carga un PDF para verificar la ancla'; statusEl.className = 'anchor-status'; }
+        return;
+    }
+
+    if (statusEl) { statusEl.textContent = '⏳ Buscando…'; statusEl.className = 'anchor-status searching'; }
+    const refY = await _findAnchorInPdf(text, part.page || 0);
+    if (refY !== null) {
+        part.anchor.refY = refY;
+        if (statusEl) { statusEl.textContent = `✅ Encontrada al ${Math.round(refY * 100)}% de la página`; statusEl.className = 'anchor-status found'; }
+    } else {
+        part.anchor.refY = null;
+        if (statusEl) { statusEl.textContent = '❌ No encontrada en este documento'; statusEl.className = 'anchor-status not-found'; }
+    }
+}
+
+function toggleAnchorSection(partId) {
+    const config = document.getElementById(`anchor-config-${partId}`);
+    if (!config) return;
+    const visible = config.style.display !== 'none';
+    config.style.display = visible ? 'none' : 'block';
+    if (!visible) {
+        document.getElementById(`anchor-inp-${partId}`)?.focus();
+    }
+}
+
+// ── Vista previa del nombre ───────────────────────────────────────────────────
+function applyTransformPreview(text, transform) {
+    switch (transform) {
+        case 'strip_zeros':   return text.replace(/\b0+(\d)/g, '$1');
+        case 'upper':         return text.toUpperCase();
+        case 'lower':         return text.toLowerCase();
+        case 'replace_slash': return text.replace(/\//g, '-');
+        case 'numbers_only':  return text.replace(/[^\d]/g, '');
+        default:              return text;
+    }
+}
+
+function updateRenamePreview() {
+    const box = document.getElementById('rename-preview-box');
+    const val = document.getElementById('rp-value');
+    if (!renameParts.length) { box.style.display = 'none'; return; }
+    box.style.display = 'block';
+    const preview = renameParts.map(p => {
+        if (p.type === 'text') return p.value || '';
+        if (p.type === 'text-search') {
+            if (!p.before) return '';
+            const tag = p.label || 'búsqueda';
+            return `[${tag}]`;
+        }
+        const raw = p._preview || (p.rect ? '?' : '');
+        return applyTransformPreview(raw, p.transform || 'none');
+    }).join('').trim();
+    val.textContent  = preview ? `${preview}.pdf` : '—';
+    val.className    = `rp-value${preview ? '' : ' empty'}`;
+}
+
+// ── Estado del formulario ─────────────────────────────────────────────────────
+function checkSaveEnabled() {
+    const name       = document.getElementById('template-name').value.trim();
+    const hasId      = idZone !== null;
+    const hasParts   = renameParts.length > 0;
+    const allReady   = renameParts.every(p => {
+        if (p.type === 'text')        return true;
+        if (p.type === 'ocr')         return p.rect != null;
+        if (p.type === 'text-search') return p.before?.trim().length > 0;
+        return true;
+    });
+    const isComplete = name && hasId && hasParts && allReady;
+
+    const btn = document.getElementById('btn-done-window');
+    if (!btn) return;
+    if (isComplete) {
+        btn.textContent = '💾 Guardar plantilla';
+        btn.style.background = '#15803d';
+    } else {
+        btn.textContent = '💾 Guardar';
+        btn.style.background = '';
+    }
+}
+
+// ── Mensajes de error inline (evita alert() que rompe el foco en Electron) ────
+function showFormError(lines) {
+    const el = document.getElementById('form-save-error');
+    if (!el) return;
+    el.innerHTML = '<strong>Completa estos campos:</strong><br>' +
+        lines.map(l => esc(l)).join('<br>');
+    el.style.display = 'block';
+    el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    // Auto-ocultar al empezar a editar cualquier campo
+    const hide = () => { el.style.display = 'none'; el.removeEventListener('input', hide, true); };
+    document.getElementById('view-form').addEventListener('input', hide, { capture: true, once: true });
+}
+
+function hideFormError() {
+    const el = document.getElementById('form-save-error');
+    if (el) el.style.display = 'none';
+}
+
+// ── Botón Guardar ─────────────────────────────────────────────────────────────
+async function handleDoneButton() {
+    const name     = document.getElementById('template-name').value.trim();
+    const hasId    = idZone !== null;
+    const hasParts = renameParts.length > 0;
+    const allReady = renameParts.every(p => {
+        if (p.type === 'text')        return true;
+        if (p.type === 'ocr')         return p.rect != null;
+        if (p.type === 'text-search') return p.before?.trim().length > 0;
+        return true;
+    });
+    const isComplete = name && hasId && hasParts && allReady;
+
+    if (!isComplete) {
+        const missing = [];
+        if (!name)     missing.push('• Nombre de la plantilla');
+        if (!hasId)    missing.push('• Zona de identificación (naranja)');
+        if (!hasParts) missing.push('• Al menos una parte del formato de nombre');
+        else if (!allReady) {
+            renameParts.forEach(p => {
+                if (p.type === 'ocr' && !p.rect)
+                    missing.push(`• Dibuja la zona OCR "${p.label || 'sin etiqueta'}"`);
+                if (p.type === 'text-search' && !p.before?.trim())
+                    missing.push(`• Rellena "Texto antes" en la parte de búsqueda "${p.label || 'sin etiqueta'}"`);
+            });
+        }
+        showFormError(missing);
+        return;
+    }
+
+    hideFormError();
+    await saveTemplate();
+}
+
+async function saveTemplate() {
+    const name = document.getElementById('template-name').value.trim();
+    if (!name || !idZone || !renameParts.length) return;
+
+    const btn = document.getElementById('btn-done-window');
+    const prevText = btn.textContent;
+    btn.disabled = true; btn.textContent = 'Guardando...';
+
+    const partsToSave = renameParts.map(p => {
+        if (p.type === 'text') {
+            return { type: 'text', value: p.value || '' };
+        }
+        if (p.type === 'text-search') {
+            return {
+                type: 'text-search',
+                label: p.label || '',
+                before: p.before || '',
+                after: p.after || '',
+                transform: p.transform || 'none'
+            };
+        }
+        // ocr
+        return {
+            type: 'ocr',
+            page: p.page,
+            rect: p.rect,
+            label: p.label || '',
+            transform: p.transform || 'none',
+            anchor: p.anchor || null
+        };
+    });
+
+    const result = await window.ocrZonalAPI.saveTemplate({
+        nombre:         name,
+        identification: { page: idZone.page, rect: idZone.rect, text: idZone.text },
+        renameParts:    partsToSave
+    });
+
+    btn.disabled = false;
+
+    if (!result.success) {
+        alert('Error al guardar la plantilla');
+        btn.textContent = prevText;
+        return;
+    }
+
+    // Volver a la lista
+    resetForm();
+    await loadTemplatesList();
+    showListMode();
+}
+
+// ── Nivel de confianza ────────────────────────────────────────────────────────
+function confidenceInfo(n) {
+    if (!n || n < 1)  return { icon: '🌱', label: 'Sin datos',    bar: 0,   color: '#d1d5db' };
+    if (n < 3)        return { icon: '⚡', label: 'Aprendiendo',  bar: 25,  color: '#f59e0b' };
+    if (n < 10)       return { icon: '🎓', label: 'Aprendido',    bar: 65,  color: '#3b82f6' };
+    return            { icon: '⭐', label: 'Experto',             bar: 100, color: '#10b981' };
+}
+
+// ── Lista de plantillas ───────────────────────────────────────────────────────
+async function loadTemplatesList() {
+    const [templates, pending] = await Promise.all([
+        window.ocrZonalAPI.getAllTemplates(),
+        window.ocrZonalAPI.getPendingPatterns()
+    ]);
+
+    const container = document.getElementById('templates-list');
+    document.getElementById('template-count').textContent = templates.length;
+
+    if (!templates.length) {
+        container.innerHTML = '<div class="no-templates">Aún no has creado plantillas</div>';
+    } else {
+        container.innerHTML = '';
+        templates.forEach(t => {
+            const c    = confidenceInfo(t.confirmations || 0);
+            const uses = t.confirmations || 0;
+            const item = document.createElement('div');
+            item.className = 'template-item';
+            item.style.flexDirection = 'column';
+            item.style.alignItems    = 'stretch';
+            item.style.gap           = '4px';
+            item.innerHTML = `
+                <div style="display:flex;align-items:center;gap:8px">
+                    <div class="tpl-icon">${c.icon}</div>
+                    <div class="tpl-info">
+                        <div class="tpl-name">${esc(t.nombre)}</div>
+                        <div class="tpl-sub">${c.label} · ${uses} uso${uses !== 1 ? 's' : ''}</div>
+                    </div>
+                    <button class="tpl-delete" data-id="${t.id}" title="Eliminar">✕</button>
+                </div>
+                <div style="height:4px;background:#f0f0f0;border-radius:2px;overflow:hidden">
+                    <div style="height:100%;width:${c.bar}%;background:${c.color};border-radius:2px;transition:width .4s"></div>
+                </div>`;
+            item.querySelector('.tpl-delete').addEventListener('click', async () => {
+                if (!confirm(`¿Eliminar la plantilla "${t.nombre}"?`)) return;
+                await window.ocrZonalAPI.deleteTemplate(t.id);
+                await loadTemplatesList();
+            });
+            container.appendChild(item);
+        });
+    }
+
+    // Patrones pendientes
+    const active = (pending || []).filter(p => !p.promoted && p.count >= 2);
+    const pendingSection = document.getElementById('pending-section');
+    const pendingList    = document.getElementById('pending-list');
+    document.getElementById('pending-count').textContent = active.length;
+    pendingSection.style.display = active.length ? 'block' : 'none';
+
+    if (active.length) {
+        pendingList.innerHTML = '';
+        active.forEach(p => {
+            const last = p.renames?.[0]?.finalName || '—';
+            const item = document.createElement('div');
+            item.className = 'template-item';
+            item.style.flexDirection = 'column';
+            item.style.gap = '6px';
+            item.innerHTML = `
+                <div style="display:flex;align-items:center;gap:8px">
+                    <div class="tpl-icon">📄</div>
+                    <div class="tpl-info">
+                        <div class="tpl-name">${esc(p.typeName || 'Sin tipo')} <span style="font-weight:400;color:#888">(${p.count} docs)</span></div>
+                        <div class="tpl-sub">Último: "${esc(last.length > 40 ? last.slice(0,40)+'…' : last)}"</div>
+                    </div>
+                    <button class="tpl-delete" data-id="${p.id}" title="Ignorar" style="color:#9ca3af">✕</button>
+                </div>
+                <button class="btn-save-tpl" data-id="${p.id}"
+                    style="padding:6px;font-size:.76rem;background:#f59e0b"
+                    title="Crear una plantilla para este tipo">
+                    🎓 Crear plantilla para aprender a renombrarlo
+                </button>`;
+            item.querySelector('.tpl-delete').addEventListener('click', async () => {
+                await window.ocrZonalAPI.deletePendingPattern(p.id);
+                await loadTemplatesList();
+            });
+            item.querySelector('.btn-save-tpl').addEventListener('click', async () => {
+                alert(`Carga un PDF de ejemplo de "${p.typeName || 'este tipo'}" con el botón "Cargar PDF de ejemplo", luego marca las zonas y guarda la plantilla.`);
+                await window.ocrZonalAPI.promotePendingPattern(p.id);
+                await loadTemplatesList();
+                // Abrir el formulario listo para crear la plantilla
+                resetForm();
+                showFormMode();
+            });
+            pendingList.appendChild(item);
+        });
+    }
+}
+
+function esc(s) {
+    return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── Estadísticas ML ───────────────────────────────────────────────────────────
+async function loadMLStats() {
+    const stats = await window.ocrZonalAPI.mlGetStats();
+    document.getElementById('ml-total-docs').textContent = `${stats.totalDocs} docs`;
+
+    const list = document.getElementById('ml-class-list');
+    if (!stats.totalDocs || !stats.classCount) {
+        list.innerHTML = '<div style="font-size:.76rem;color:#bbb;padding:6px 0">Sin datos aún. Procesa documentos para entrenar el modelo.</div>';
+        return;
+    }
+
+    list.innerHTML = Object.entries(stats.classes).map(([name, info]) => `
+        <div style="margin-bottom:8px">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:3px">
+                <span style="font-size:.78rem;font-weight:700">${info.qualityIcon} ${esc(name)}</span>
+                <span style="font-size:.72rem;color:#888">${info.docCount} docs · ${info.quality}</span>
+                <button class="tpl-delete" data-class="${esc(name)}" title="Borrar datos de este tipo" style="color:#9ca3af;font-size:.65rem">✕</button>
+            </div>
+            <div style="height:5px;background:#f0f0f0;border-radius:3px;overflow:hidden">
+                <div style="height:100%;width:${info.qualityPct}%;background:${
+                    info.qualityPct >= 100 ? '#10b981' : info.qualityPct >= 30 ? '#3b82f6' : info.qualityPct >= 10 ? '#f59e0b' : '#d1d5db'
+                };border-radius:3px;transition:width .4s"></div>
+            </div>
+        </div>`).join('');
+
+    list.querySelectorAll('[data-class]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            const cls = btn.dataset.class;
+            if (!confirm(`¿Borrar todos los datos de entrenamiento para "${cls}"?`)) return;
+            await window.ocrZonalAPI.mlDeleteClass(cls);
+            await loadMLStats();
+        });
+    });
+}
+
+// ── Spinner ───────────────────────────────────────────────────────────────────
+function showSpinner(txt) {
+    emptyState.style.display    = 'none';
+    canvasWrapper.style.display = 'none';
+    spinnerEl.style.display     = 'flex';
+    spinnerText.textContent     = txt;
+}
+function hideSpinner() {
+    spinnerEl.style.display = 'none';
+    if (pdfDoc) canvasWrapper.style.display = 'inline-block';
+}
+function showEmpty() {
+    spinnerEl.style.display = 'none'; canvasWrapper.style.display = 'none';
+    emptyState.style.display = 'flex';
+}
+</script>
+</body>
+</html>
