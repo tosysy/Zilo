@@ -486,7 +486,7 @@ body.dark-mode .panel-footer { background: #2a2a2a; border-color: #333; }
                                placeholder="Nombre del tipo (ej: FACTURAS ENDESA)">
                         <div style="display:flex;gap:6px">
                             <input type="text" id="tpl-assign-new-folder" class="field-input"
-                                   placeholder="Carpeta destino (opcional)" style="flex:1">
+                                   placeholder="Carpeta destino (obligatoria)" style="flex:1">
                             <button id="tpl-assign-pick-folder" class="btn-cancel-win" style="white-space:nowrap">📁</button>
                         </div>
                     </div>
@@ -1408,7 +1408,13 @@ async function handleDoneButton() {
     });
     const isComplete = name && hasId && hasParts && allReady;
 
-    if (!isComplete) {
+    // Si se va a crear un tipo nuevo, exigir nombre y carpeta destino
+    const assignSel    = document.getElementById('tpl-assign-type')?.value;
+    const newTypeName  = (document.getElementById('tpl-assign-new-name')?.value || '').trim();
+    const newTypeFolder= (document.getElementById('tpl-assign-new-folder')?.value || '').trim();
+    const newTypeOk    = assignSel !== '__new__' || (newTypeName && newTypeFolder);
+
+    if (!isComplete || !newTypeOk) {
         const missing = [];
         if (!name)     missing.push('• Nombre de la plantilla');
         if (!hasId)    missing.push('• Zona de identificación (naranja)');
@@ -1421,6 +1427,8 @@ async function handleDoneButton() {
                     missing.push(`• Rellena "Texto antes" en la parte de búsqueda "${p.label || 'sin etiqueta'}"`);
             });
         }
+        if (assignSel === '__new__' && !newTypeName)   missing.push('• Nombre del nuevo tipo de documento');
+        if (assignSel === '__new__' && !newTypeFolder) missing.push('• Carpeta destino del nuevo tipo (obligatoria)');
         showFormError(missing);
         return;
     }
@@ -1506,11 +1514,12 @@ async function assignTemplateToType(templateId) {
     if (choice === '__new__') {
         const typeName   = (document.getElementById('tpl-assign-new-name').value || '').trim().toUpperCase();
         const typeFolder = (document.getElementById('tpl-assign-new-folder').value || '').trim();
-        if (!typeName) throw new Error('Falta el nombre del nuevo tipo');
+        if (!typeName)   throw new Error('Falta el nombre del nuevo tipo');
+        if (!typeFolder) throw new Error('La carpeta destino es obligatoria para un tipo nuevo');
         const res = await window.ocrZonalAPI.createDocType({
             name:   typeName,
             icon:   '📄',
-            folder: typeFolder || null,
+            folder: typeFolder,
             ocr_template_ids: [templateId],
         });
         if (!res?.success) throw new Error(res?.error || 'No se pudo crear el tipo');

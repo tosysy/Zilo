@@ -968,7 +968,7 @@ function enterTemplateMode() {
         <div class="new-type-fields" id="tpl-new-type-fields" style="display:none">
             <input type="text" id="tpl-new-type-name" placeholder="Nombre del tipo (ej: FACTURAS ENDESA)">
             <div class="folder-row">
-                <input type="text" id="tpl-new-type-folder" placeholder="Carpeta destino (opcional)">
+                <input type="text" id="tpl-new-type-folder" placeholder="Carpeta destino (obligatoria)">
                 <button class="btn-pick-folder" id="btn-pick-type-folder">📁</button>
             </div>
         </div>
@@ -1050,9 +1050,11 @@ function enterTemplateMode() {
                 document.getElementById('tpl-new-type-folder').value = res;
             }
         } catch (_) {}
+        updateSaveBtn();
     });
 
     document.getElementById('tpl-new-type-name')?.addEventListener('input', updateSaveBtn);
+    document.getElementById('tpl-new-type-folder')?.addEventListener('input', updateSaveBtn);
 }
 
 async function loadTypesForSelector() {
@@ -1098,12 +1100,15 @@ async function loadTypesForSelector() {
 function updateSaveBtn() {
     const btn = document.getElementById('btn-save-tpl');
     if (!btn) return;
-    const name    = (document.getElementById('tpl-name')?.value || '').trim();
-    const hasPart = !!tplPartZone?.rect;
-    const typeSel = document.getElementById('tpl-type-sel')?.value;
-    const newName = (document.getElementById('tpl-new-type-name')?.value || '').trim();
-    const typeOk  = typeSel && typeSel !== '__new__' || (typeSel === '__new__' && newName.length > 0);
-    btn.disabled  = !(name && hasPart && typeOk);
+    const name      = (document.getElementById('tpl-name')?.value || '').trim();
+    const hasPart   = !!tplPartZone?.rect;
+    const typeSel   = document.getElementById('tpl-type-sel')?.value;
+    const newName   = (document.getElementById('tpl-new-type-name')?.value || '').trim();
+    const newFolder = (document.getElementById('tpl-new-type-folder')?.value || '').trim();
+    // Tipo existente → OK. Tipo nuevo → requiere nombre Y carpeta destino.
+    const typeOk    = (typeSel && typeSel !== '__new__')
+                    || (typeSel === '__new__' && newName.length > 0 && newFolder.length > 0);
+    btn.disabled    = !(name && hasPart && typeOk);
 }
 
 async function saveTemplateAndContinue() {
@@ -1144,10 +1149,11 @@ async function saveTemplateAndContinue() {
         if (typeSel === '__new__') {
             const typeName   = document.getElementById('tpl-new-type-name').value.trim().toUpperCase();
             const typeFolder = document.getElementById('tpl-new-type-folder').value.trim();
+            if (!typeFolder) throw new Error('La carpeta destino es obligatoria para un tipo nuevo');
             const createRes  = await window.manualRenameAPI.createDocType({
                 name:   typeName,
                 icon:   '📄',
-                folder: typeFolder || null,
+                folder: typeFolder,
                 ocr_template_ids: [templateId],   // array, no JSON string
             });
             if (!createRes?.success) throw new Error(createRes?.error || 'No se pudo crear el tipo de documento');
