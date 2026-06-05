@@ -1193,6 +1193,20 @@ async function saveTemplateAndContinue() {
             }
         }
 
+        // 6. Si el tipo tiene carpeta destino y hay un nombre válido →
+        //    procesar el documento automáticamente (moverlo + indexarlo) sin pedir
+        //    una segunda confirmación. Así el documento sobre el que se creó la
+        //    plantilla queda ya archivado en su sitio.
+        const finalName = buildFilename();
+        const folderOk  = !!(activeType?.folder);
+        if (folderOk && finalName && !INVALID_FILE_CHARS.test(finalName.replace(/\.pdf$/i, ''))) {
+            confirmRename();   // mueve + indexa + entrena, y avanza la cola
+        } else if (overlay) {
+            // No se puede archivar automáticamente (sin carpeta o nombre inválido):
+            // dejar el formulario listo para que el usuario revise y confirme.
+            overlay.classList.remove('visible');
+        }
+
     } catch (e) {
         if (overlay) overlay.classList.remove('visible');
         alert('Error al crear la plantilla: ' + e.message);

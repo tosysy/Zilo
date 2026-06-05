@@ -387,16 +387,9 @@ async function handleFiles(files) {
 function validateDestination() {
     if (currentMode === 'manual') return true;
     if (currentMode === 'auto') {
-        const hasAnyType = userDocTypes.length > 0;
-        if (!hasAnyType) {
-            alert('⚙️ Primero define al menos un tipo de documento.\n\nPulsa "Gestionar tipos de documento" para crear tipos y enseñarle a Zilo.');
-            return false;
-        }
-        const hasTemplates = userDocTypes.some(t => _getTypeTemplateIds(t).length > 0);
-        if (!hasTemplates) {
-            alert('⚙️ Ningún tipo tiene plantilla OCR vinculada.\n\nAbre el Motor OCR Zonal 🎯 para crear plantillas y vincúlalas a tus tipos de documento.');
-            return false;
-        }
+        // Se permite procesar aunque NO haya tipos ni plantillas:
+        // los documentos que no se reconozcan irán a la cola de revisión manual,
+        // donde el usuario puede crear el tipo y la plantilla sobre la marcha.
         return true;
     }
     if (currentMode === 'type') {
@@ -1412,6 +1405,11 @@ async function handleManualRenameConfirmed(data) {
     } catch (err) {
         updateFileStatus(fileId, `❌ Error: ${err.message}`, 100, 'error');
     }
+
+    // Recargar tipos: el usuario pudo crear un tipo/plantilla nuevo durante el
+    // renombrado, y los siguientes documentos deben poder reconocerlo.
+    try { userDocTypes = await window.electronAPI.getDocTypes(); } catch (_) {}
+    renderUserTypeButtons();
 
     currentManualFile = null;
     processNextManualRename();
