@@ -540,6 +540,16 @@ function confirmRename() {
     const newFileName = buildFilename();
     if (!newFileName) return;
 
+    // Construir mapa { partLabel: valorConfirmado } para aprendizaje de posición
+    const partValuesForLearning = {};
+    if (activeTpl?.renameParts) {
+        for (const p of activeTpl.renameParts) {
+            if (p.type === 'ocr' && partValues[p.id]) {
+                partValuesForLearning[p.label || p.id] = partValues[p.id];
+            }
+        }
+    }
+
     window.manualRenameAPI.confirmRename({
         selectedTypeId:   activeType.id,
         selectedType:     activeType.name,
@@ -547,6 +557,7 @@ function confirmRename() {
         ocrText:          fileData?.ocrText || '',
         templateId:       activeTpl?.id || null,
         destinationFolder: activeType.folder || '',
+        partValues:       partValuesForLearning,   // para aprendizaje de posición
     });
 }
 

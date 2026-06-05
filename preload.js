@@ -35,6 +35,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getOcrTemplates:            ()     => ipcRenderer.invoke('ocr-zonal-get-templates'),
   incrementOcrConfirmations:  (id)   => ipcRenderer.invoke('ocr-increment-confirmations', id),
   addPendingPattern:          (data) => ipcRenderer.invoke('ocr-add-pending-pattern', data),
+  // Aprendizaje adaptativo de posiciones OCR
+  recordPartPosition: (data) => ipcRenderer.invoke('position-record',       data),
+  getAdaptiveZone:    (data) => ipcRenderer.invoke('position-get-adaptive', data),
+  getPositionStats:   (tplId)=> ipcRenderer.invoke('position-get-stats',    tplId),
+
   mlTrain:      (text, className) => ipcRenderer.invoke('ml-train',        { text, className }),
   mlClassify:   (text)            => ipcRenderer.invoke('ml-classify',     text),
   mlGetStats:   ()                => ipcRenderer.invoke('ml-get-stats'),

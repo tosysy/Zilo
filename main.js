@@ -1178,6 +1178,19 @@ ipcMain.handle('ocr-promote-pending-pattern', async (event, id) => {
   return ocrZonalEngine.promotePendingPattern(id);
 });
 
+// ── Aprendizaje adaptativo de posiciones OCR ──────────────────────────────────
+ipcMain.handle('position-record', (event, { templateId, partLabel, page, rect, source }) => {
+  return ziloDb.recordPartPosition(templateId, partLabel, page, rect, source || 'ocr');
+});
+
+ipcMain.handle('position-get-adaptive', (event, { templateId, partLabel, page, originalRect }) => {
+  return ziloDb.getAdaptiveZone(templateId, partLabel, page, originalRect);
+});
+
+ipcMain.handle('position-get-stats', (event, templateId) => {
+  return ziloDb.getPositionLearningStats(templateId);
+});
+
 // ── Motor ML ──────────────────────────────────────────────────────────────────
 ipcMain.handle('ml-train', async (event, { text, className }) => {
   // Normalizar nombre del tipo a mayúsculas para que _isExpertForType lo encuentre siempre

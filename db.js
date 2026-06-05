@@ -167,6 +167,27 @@ class ZiloDatabase {
             CREATE INDEX IF NOT EXISTS idx_lp_type ON learned_patterns(type_name);
         `);
 
+        // ── Historial de posiciones para aprendizaje adaptativo ──────────────
+        this.db.exec(`
+            -- Cada fila = una extracción confirmada con éxito
+            -- Acumula historial de dónde aparece realmente cada dato en los documentos
+            CREATE TABLE IF NOT EXISTS ocr_position_history (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                template_id TEXT    NOT NULL,
+                part_label  TEXT    NOT NULL,   -- label o id de la parte OCR
+                page        INTEGER NOT NULL DEFAULT 0,
+                norm_x      REAL    NOT NULL,   -- posición normalizada 0-1
+                norm_y      REAL    NOT NULL,
+                norm_w      REAL    NOT NULL,
+                norm_h      REAL    NOT NULL,
+                source      TEXT    NOT NULL DEFAULT 'ocr',  -- 'ocr' | 'text_layer' | 'adaptive'
+                confirmed_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+                FOREIGN KEY (template_id) REFERENCES ocr_templates(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_pos_hist
+                ON ocr_position_history(template_id, part_label, page);
+        `);
+
         // ── Tablas de plantillas OCR (migradas desde JSON) ────────────────────
         this.db.exec(`
             CREATE TABLE IF NOT EXISTS ocr_templates (
@@ -1119,7 +1140,138 @@ class ZiloDatabase {
         })();
         return { success: true };
     }
-}
+
+    // =========================================================================
+    // APRENDIZAJE ADAPTATIVO DE POSICIONES OCR
+    // =========================================================================
+
+    /**
+     * Registra dónde se encontró realmente el texto en el documento.
+     * Mantiene un buffer de máximo MAX_POS_HISTORY posiciones por (template, part, page).
+     *
+     * @param {string} templateId
+     * @param {string} partLabel    - Etiqueta o ID de la parte OCR
+     * @param {number} page         - Página 0-indexed
+     * @param {{x,y,w,h}} rect      - Posición normalizada (0-1) donde se encontró el texto
+     * @param {string} source       - 'ocr' | 'text_layer' | 'adaptive'
+     */
+    recordPartPosition(templateId, partLabel, page, rect, source = 'ocr') {
+        if (!templateId || !partLabel || !rect) return { success: false };
+        const MAX_POS_HISTORY = 50;
+
+        // Mantener solo las últimas MAX_POS_HISTORY por (template, part, page)
+        const n = this.db.prepare(
+            `SELECT COUNT(*) as n FROM ocr_position_history
+             WHERE template_id=? AND part_label=? AND page=?`
+        ).get(templateId, partLabel, page).n;
+
+        if (n >= MAX_POS_HISTORY) {
+            const oldest = this.db.prepare(
+                `SELECT id FROM ocr_position_history
+                 WHERE template_id=? AND part_label=? AND page=?
+                 ORDER BY confirmed_at ASC LIMIT 1`
+            ).get(templateId, partLabel, page);
+            if (oldest) this.db.prepare('DELETE FROM ocr_position_history WHERE id=?').run(oldest.id);
+        }
+
+        this.db.prepare(
+            `INSERT INTO ocr_position_history
+             (template_id, part_label, page, norm_x, norm_y, norm_w, norm_h, source)
+             VALUES (?,?,?,?,?,?,?,?)`
+        ).run(templateId, partLabel, page,
+              Math.max(0, rect.x || 0),
+              Math.max(0, rect.y || 0),
+              Math.max(0.005, rect.w || 0.05),
+              Math.max(0.003, rect.h || 0.02),
+              source);
+
+        return { success: true };
+    }
+
+    /**
+     * Calcula la zona adaptativa para (templateId, partLabel, page) basándose
+     * en el historial de posiciones confirmadas.
+     *
+     * Algoritmo:
+     *  - Media ponderada con decaimiento exponencial (el más reciente pesa más)
+     *  - Zona final = centro aprendido ± max(mitad_original, 1.5 * desviación_típica)
+     *  - Retorna null si hay menos de MIN_HISTORY confirmaciones
+     *
+     * @returns {{ x, y, w, h, confidence, spreadX, spreadY } | null}
+     */
+    getAdaptiveZone(templateId, partLabel, page, originalRect) {
+        const MIN_HISTORY = 3;
+
+        const history = this.db.prepare(
+            `SELECT norm_x, norm_y, norm_w, norm_h, source
+             FROM ocr_position_history
+             WHERE template_id=? AND part_label=? AND page=?
+             ORDER BY confirmed_at DESC LIMIT 25`
+        ).all(templateId, partLabel, page);
+
+        if (history.length < MIN_HISTORY) return null;
+
+        const n       = history.length;
+        const decay   = 0.12;   // decaimiento exponencial por posición en el historial
+        const weights = history.map((_, i) => Math.exp(-i * decay));
+        const wSum    = weights.reduce((a, b) => a + b, 0);
+
+        // Media ponderada de centros (cx, cy)
+        const cx = history.map(h => h.norm_x + h.norm_w / 2);
+        const cy = history.map(h => h.norm_y + h.norm_h / 2);
+        const wcx = cx.reduce((s, v, i) => s + weights[i] * v, 0) / wSum;
+        const wcy = cy.reduce((s, v, i) => s + weights[i] * v, 0) / wSum;
+
+        // Desviación típica ponderada → medida de "cuánto varía la posición"
+        const sx = Math.sqrt(cx.reduce((s, v, i) => s + weights[i] * (v - wcx) ** 2, 0) / wSum);
+        const sy = Math.sqrt(cy.reduce((s, v, i) => s + weights[i] * (v - wcy) ** 2, 0) / wSum);
+
+        // Padding: al menos la mitad de la zona original, ampliado por la dispersión
+        const or = originalRect || {};
+        const padX = Math.max((or.w || 0.05) / 2 + 0.01,  1.5 * sx + 0.01);
+        const padY = Math.max((or.h || 0.02) / 2 + 0.005, 1.5 * sy + 0.005);
+
+        const ax = Math.max(0,     wcx - padX);
+        const ay = Math.max(0,     wcy - padY);
+        const aw = Math.min(1 - ax, 2 * padX);
+        const ah = Math.min(1 - ay, 2 * padY);
+
+        return {
+            x: ax, y: ay, w: aw, h: ah,
+            confidence: n,
+            spreadX:    Math.round(sx * 1000) / 1000,
+            spreadY:    Math.round(sy * 1000) / 1000,
+            centerX:    Math.round(wcx * 1000) / 1000,
+            centerY:    Math.round(wcy * 1000) / 1000,
+            topSource:  history[0]?.source || 'ocr',
+        };
+    }
+
+    /**
+     * Estadísticas de aprendizaje para una plantilla (para mostrar en UI).
+     * Retorna por cuántas partes hay historial y cuánto han convergido.
+     */
+    getPositionLearningStats(templateId) {
+        const rows = this.db.prepare(
+            `SELECT part_label, page, COUNT(*) as confirmations,
+                    AVG(norm_x) as avg_x, AVG(norm_y) as avg_y,
+                    AVG(norm_w) as avg_w, AVG(norm_h) as avg_h
+             FROM ocr_position_history
+             WHERE template_id = ?
+             GROUP BY part_label, page`
+        ).all(templateId);
+
+        return rows.map(r => ({
+            partLabel:     r.part_label,
+            page:          r.page,
+            confirmations: r.confirmations,
+            learnedRect:   { x: r.avg_x, y: r.avg_y, w: r.avg_w, h: r.avg_h },
+            isReliable:    r.confirmations >= 3,
+            isExpert:      r.confirmations >= 10,
+        }));
+    }
+
+} // ── fin clase ZiloDatabase ───────────────────────────────────────────────
 
 /** Similitud de dos arrays de palabras (usada para patrones pendientes). */
 function _fingerprintSimilarity(fp1, fp2) {

@@ -565,6 +565,239 @@ async function _ocrCrop(canvas, vp, normRect) {
     return data.text.replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+// =================================================================================
+// APRENDIZAJE ADAPTATIVO DE POSICIONES OCR
+// =================================================================================
+
+/**
+ * Busca un texto en la capa de texto nativa del PDF y devuelve su bounding-box
+ * normalizada (0-1). Para PDFs digitales es exacta; para escaneados, null.
+ *
+ * @param {PDFPageProxy} pdfPage
+ * @param {string} targetText  - texto a buscar (≥3 chars)
+ * @returns {Promise<{x,y,w,h}|null>}
+ */
+async function _findTextPositionInPage(pdfPage, targetText) {
+    if (!targetText?.trim() || targetText.trim().length < 3) return null;
+    try {
+        const content = await pdfPage.getTextContent();
+        const vp      = pdfPage.getViewport({ scale: 1 });
+        const pw      = vp.viewBox ? vp.viewBox[2] : vp.width  / (vp.scale || 1);
+        const ph      = vp.viewBox ? vp.viewBox[3] : vp.height / (vp.scale || 1);
+        const target  = _normalizeText(targetText).slice(0, 60);
+
+        // Agrupar ítems por línea (tolerancia ±3 puntos PDF)
+        const lineMap = {};
+        for (const item of content.items) {
+            if (!item.str?.trim()) continue;
+            const yKey = Math.round(item.transform[5] / 3) * 3;
+            if (!lineMap[yKey]) lineMap[yKey] = { rawY: item.transform[5], items: [] };
+            lineMap[yKey].items.push(item);
+        }
+
+        for (const line of Object.values(lineMap)) {
+            const lineNorm = _normalizeText(line.items.map(i => i.str).join(' '));
+            if (!lineNorm.includes(target)) continue;
+
+            // Ítem específico que contiene el texto buscado
+            const hit = line.items.find(i => _normalizeText(i.str).includes(target))
+                      || line.items[0];
+
+            const rx = hit.transform[4];
+            const ry = hit.transform[5];
+            const rw = hit.width || Math.min(pw * 0.25, 100);
+            const rh = Math.abs(hit.transform[3]) || 12;
+
+            return {
+                x: Math.max(0, Math.min(0.98, rx / pw)),
+                y: Math.max(0, Math.min(0.98, 1 - (ry + rh) / ph)),
+                w: Math.max(0.02, Math.min(0.9,  rw / pw)),
+                h: Math.max(0.01, Math.min(0.5,  rh / ph)),
+            };
+        }
+    } catch (e) {
+        console.warn('[PosLearn] _findTextPositionInPage:', e.message);
+    }
+    return null;
+}
+
+/**
+ * Registra asincrónicamente la posición donde se encontró texto.
+ * Prioriza la posición de la capa de texto (más precisa) sobre la zona OCR usada.
+ *
+ * @param {string}         templateId
+ * @param {object}         part       - parte OCR del template
+ * @param {object}         pg         - { canvas, vp, page }
+ * @param {{x,y,w,h}}      usedRect   - zona que produjo el resultado
+ * @param {string}         foundText  - texto extraído
+ * @param {string}         source     - 'ocr' | 'adaptive'
+ */
+function _recordPositionAsync(templateId, part, pg, usedRect, foundText, source) {
+    if (!templateId || !part) return;
+    (async () => {
+        try {
+            let rect       = usedRect;
+            let finalSource = source;
+
+            // Intentar posición exacta de la capa de texto (más precisa)
+            if (foundText?.trim().length >= 3 && pg?.page) {
+                const textPos = await _findTextPositionInPage(pg.page, foundText.trim());
+                if (textPos) {
+                    rect        = textPos;
+                    finalSource = 'text_layer';
+                }
+            }
+
+            await window.electronAPI.recordPartPosition({
+                templateId,
+                partLabel: part.label || part.id || 'part',
+                page:      part.page  || 0,
+                rect,
+                source:    finalSource,
+            });
+        } catch (e) {
+            console.warn('[PosLearn] Error al registrar posición:', e.message);
+        }
+    })();
+}
+
+/**
+ * Versión de _ocrCrop con aprendizaje de posición y cascada de extracción:
+ *
+ *  1. Zona original (o ancla-ajustada)
+ *  2. Zona adaptativa aprendida (si hay ≥3 confirmaciones y es distinta)
+ *  3. Búsqueda en capa de texto nativa (si ninguna zona produjo texto)
+ *
+ * Registra automáticamente la posición que funcionó.
+ *
+ * @param {object} pg       - { canvas, vp, page }
+ * @param {{x,y,w,h}} rect  - zona original (posiblemente ajustada por ancla)
+ * @param {object} tpl      - plantilla completa (necesitamos tpl.id)
+ * @param {object} part     - parte OCR (necesitamos part.label, part.page)
+ * @returns {Promise<string>}
+ */
+async function _ocrCropWithLearning(pg, rect, tpl, part) {
+    const templateId = tpl?.id;
+    const partLabel  = part.label || part.id || 'part';
+    const page       = part.page  || 0;
+
+    // ── 1. Zona original ──────────────────────────────────────────────────────
+    const text1 = await _ocrCrop(pg.canvas, pg.vp, rect);
+    if (text1.trim()) {
+        _recordPositionAsync(templateId, part, pg, rect, text1, 'ocr');
+        return text1;
+    }
+
+    // ── 2. Zona adaptativa aprendida ──────────────────────────────────────────
+    if (templateId) {
+        try {
+            const adaptive = await window.electronAPI.getAdaptiveZone({
+                templateId, partLabel, page, originalRect: rect,
+            });
+
+            if (adaptive && adaptive.confidence >= 3) {
+                // Comprobar que la zona aprendida difiere significativamente
+                const drift = Math.abs(adaptive.centerX - (rect.x + rect.w / 2))
+                            + Math.abs(adaptive.centerY - (rect.y + rect.h / 2));
+
+                if (drift > 0.02) {
+                    const text2 = await _ocrCrop(pg.canvas, pg.vp, adaptive);
+                    if (text2.trim()) {
+                        console.log(
+                            `[AdaptZone] "${partLabel}": zona aprendida usada` +
+                            ` (conf:${adaptive.confidence}, drift:${(drift * 100).toFixed(1)}%` +
+                            `, spread:±${(adaptive.spreadY * 100).toFixed(1)}%↕)`
+                        );
+                        _recordPositionAsync(templateId, part, pg, adaptive, text2, 'adaptive');
+                        return text2;
+                    }
+                }
+            }
+        } catch (_) {}
+    }
+
+    // ── 3. Capa de texto nativa (PDFs digitales sin texto en la zona dibujada) ─
+    if (pg?.page) {
+        try {
+            const content = await pg.page.getTextContent();
+            const vp      = pg.page.getViewport({ scale: 1 });
+            const pw      = vp.viewBox ? vp.viewBox[2] : vp.width  / (vp.scale || 1);
+            const ph      = vp.viewBox ? vp.viewBox[3] : vp.height / (vp.scale || 1);
+
+            // Buscar ítems de texto que estén dentro de la zona original expandida ×1.5
+            const ex = Math.max(0, rect.x - rect.w * 0.25);
+            const ey = Math.max(0, rect.y - rect.h * 0.25);
+            const ew = Math.min(1 - ex, rect.w * 1.5);
+            const eh = Math.min(1 - ey, rect.h * 1.5);
+
+            const candidates = [];
+            for (const item of content.items) {
+                if (!item.str?.trim()) continue;
+                const nx = item.transform[4] / pw;
+                const ny = 1 - item.transform[5] / ph;
+                if (nx >= ex && nx <= ex + ew && ny >= ey && ny <= ey + eh) {
+                    candidates.push(item.str.trim());
+                }
+            }
+
+            if (candidates.length) {
+                const text3 = candidates.join(' ').replace(/\s+/g, ' ').trim();
+                if (text3) {
+                    console.log(`[TextLayer] "${partLabel}": encontrado en capa de texto`);
+                    // Registrar posición del primer ítem encontrado
+                    _recordPositionAsync(templateId, part, pg,
+                        { x: ex, y: ey, w: ew, h: eh }, text3, 'text_layer');
+                    return text3;
+                }
+            }
+        } catch (_) {}
+    }
+
+    return ''; // Todas las estrategias fallaron
+}
+
+/**
+ * Registra posiciones de partes OCR a partir de la capa de texto del PDF,
+ * usando los valores que el usuario confirmó manualmente.
+ * Solo requiere el PDF y los valores confirmados — no hace OCR.
+ *
+ * @param {string}   filePath        - ruta del PDF
+ * @param {string}   templateId
+ * @param {object[]} parts           - renameParts de la plantilla
+ * @param {object}   confirmedValues - { partLabel: confirmedText }
+ */
+async function _recordPositionsFromConfirmedValues(filePath, templateId, parts, confirmedValues) {
+    if (!templateId || !parts?.length || !filePath) return;
+    try {
+        const result = await window.electronAPI.readPdfFile(filePath);
+        if (!result.success) return;
+        const pdf = await pdfjsLib.getDocument({ data: result.data }).promise;
+
+        for (const part of parts) {
+            if (part.type !== 'ocr') continue;
+            const label = part.label || part.id || 'part';
+            const value = confirmedValues[label] || confirmedValues[part.id] || '';
+            if (!value?.trim() || value.trim().length < 3) continue;
+
+            try {
+                const page = await pdf.getPage((part.page || 0) + 1);
+                const pos  = await _findTextPositionInPage(page, value.trim());
+                if (pos) {
+                    window.electronAPI.recordPartPosition({
+                        templateId,
+                        partLabel: label,
+                        page:      part.page || 0,
+                        rect:      pos,
+                        source:    'text_layer_manual',
+                    }).catch(() => {});
+                }
+            } catch (_) {}
+        }
+    } catch (e) {
+        console.warn('[PosLearn] _recordPositionsFromConfirmedValues:', e.message);
+    }
+}
+
 /** Normaliza texto para comparación robusta: sin acentos, sin puntuación, minúsculas. */
 function _normalizeText(t) {
     return (t || '').toLowerCase()
@@ -714,16 +947,13 @@ async function _buildRenameText(getCanvas, tpl) {
                 const pg  = await getCanvas(part.page || 0);
                 let rect  = part.rect;
 
-                // ── Palabra ancla: ajustar zona si el layout se ha desplazado ──
+                // ── Palabra ancla: ajustar zona Y si el layout ha cambiado ─────
                 if (part.anchor?.text && part.anchor?.refY != null) {
                     const currentY = await _findAnchorY(pg.page, part.anchor.text);
                     if (currentY !== null) {
                         const deltaY = currentY - part.anchor.refY;
-                        if (Math.abs(deltaY) > 0.005) { // ignorar ruido < 0.5%
-                            rect = {
-                                ...rect,
-                                y: Math.max(0, Math.min(0.98 - rect.h, rect.y + deltaY))
-                            };
+                        if (Math.abs(deltaY) > 0.005) {
+                            rect = { ...rect, y: Math.max(0, Math.min(0.98 - rect.h, rect.y + deltaY)) };
                             console.log(`[Anchor] "${part.anchor.text}": desplazamiento ${(deltaY * 100).toFixed(1)}%`);
                         }
                     } else {
@@ -731,7 +961,8 @@ async function _buildRenameText(getCanvas, tpl) {
                     }
                 }
 
-                let text = await _ocrCrop(pg.canvas, pg.vp, rect);
+                // ── Extracción con aprendizaje de posición (cascada 3 niveles) ──
+                let text = await _ocrCropWithLearning(pg, rect, tpl, part);
                 text = _applyPartTransform(text, part.transform || 'none');
                 segments.push(text);
             }
@@ -1162,6 +1393,18 @@ async function handleManualRenameConfirmed(data) {
                         });
                     }
                 } catch (_) {}
+
+                // 🎯 Aprendizaje de posición: registrar dónde está el texto confirmado
+                if (data.templateId && data.partValues && file?.path) {
+                    // data.partValues = { partLabel: valor_confirmado } — enviado desde manual-rename-window
+                    const tpl = (await window.electronAPI.getOcrTemplates() || []).find(t => t.id === data.templateId);
+                    if (tpl?.renameParts) {
+                        _recordPositionsFromConfirmedValues(
+                            file.path, data.templateId,
+                            tpl.renameParts, data.partValues
+                        ).catch(() => {});
+                    }
+                }
             } else {
                 updateFileStatus(fileId, `❌ ${result.error}`, 100, 'error');
             }
