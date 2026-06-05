@@ -43,10 +43,18 @@ class MLEngine {
     /** Carga el modelo desde SQLite en memoria (una vez por sesión). */
     _load() {
         if (this._model) return;
-        this._model = this._db.mlLoad() || {
-            version: 2, classes: {}, docFreq: {}, totalDocs: 0,
-            corpus: [], lastTrained: null,
-        };
+        try {
+            this._model = this._db.mlLoad() || null;
+        } catch (e) {
+            console.error('[ML] Error al cargar modelo desde DB:', e.message);
+            this._model = null;
+        }
+        if (!this._model) {
+            this._model = {
+                version: 2, classes: {}, docFreq: {}, totalDocs: 0,
+                corpus: [], lastTrained: null,
+            };
+        }
     }
 
     /** Encola una operación de escritura para evitar races concurrentes. */

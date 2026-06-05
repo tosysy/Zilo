@@ -990,19 +990,22 @@ class ZiloDatabase {
             corpus:      [],
         };
 
-        // Clases y word counts
+        // Clases y word counts — un solo JOIN en vez de N queries
         const classes = this.db.prepare('SELECT * FROM ml_classes').all();
         for (const cls of classes) {
-            const words = this.db.prepare(
-                'SELECT word, count FROM ml_word_counts WHERE class_id = ?'
-            ).all(cls.id);
-            const wordCounts = {};
-            for (const w of words) wordCounts[w.word] = w.count;
             model.classes[cls.class_name] = {
-                wordCounts,
+                wordCounts: {},
                 totalWords: cls.total_words,
                 docCount:   cls.doc_count,
             };
+        }
+        const allWords = this.db.prepare(
+            'SELECT c.class_name, wc.word, wc.count FROM ml_word_counts wc JOIN ml_classes c ON wc.class_id = c.id'
+        ).all();
+        for (const w of allWords) {
+            if (model.classes[w.class_name]) {
+                model.classes[w.class_name].wordCounts[w.word] = w.count;
+            }
         }
 
         // Document frequency
@@ -1017,66 +1020,55 @@ class ZiloDatabase {
     }
 
     /**
+     * Prepara los statements de entrenamiento ML una sola vez (llamado desde initialize).
+     */
+    _prepareMlStatements() {
+        this._mlStmt = {
+            upsertClass:  this.db.prepare(`INSERT INTO ml_classes(class_name, total_words, doc_count) VALUES (?,0,0) ON CONFLICT(class_name) DO NOTHING`),
+            updateClass:  this.db.prepare(`UPDATE ml_classes SET total_words = total_words + ?, doc_count = doc_count + 1 WHERE class_name = ?`),
+            getClassId:   this.db.prepare(`SELECT id FROM ml_classes WHERE class_name = ?`),
+            upsertWord:   this.db.prepare(`INSERT INTO ml_word_counts(class_id, word, count) VALUES (?,?,?) ON CONFLICT(class_id, word) DO UPDATE SET count = count + excluded.count`),
+            upsertFreq:   this.db.prepare(`INSERT INTO ml_doc_freq(word, doc_frequency) VALUES (?,1) ON CONFLICT(word) DO UPDATE SET doc_frequency = doc_frequency + 1`),
+            insertCorpus: this.db.prepare(`INSERT INTO ml_corpus(class_name, tokens) VALUES (?,?)`),
+            countCorpus:  this.db.prepare(`SELECT COUNT(*) as n FROM ml_corpus`),
+            getOldest:    this.db.prepare(`
+                SELECT mc.id FROM ml_corpus mc
+                JOIN (SELECT class_name FROM ml_corpus GROUP BY class_name ORDER BY COUNT(*) DESC LIMIT 1) top
+                  ON mc.class_name = top.class_name
+                ORDER BY mc.id ASC LIMIT 1
+            `),
+            deleteCorpus: this.db.prepare(`DELETE FROM ml_corpus WHERE id = ?`),
+            upsertMeta:   this.db.prepare(`INSERT OR REPLACE INTO ml_metadata(id, total_docs, version, last_trained) VALUES (1,?,2,?)`),
+        };
+    }
+
+    /**
      * Persiste una sesión de entrenamiento de forma incremental.
      * Recibe los deltas exactos para no reescribir todo el modelo.
      */
     mlSaveTrain({ className, tf, uniqueTokens, totalDocs, lastTrained, corpusEntry, maxCorpusSize }) {
-        const upsertClass = this.db.prepare(`
-            INSERT INTO ml_classes(class_name, total_words, doc_count)
-            VALUES (?, 0, 0)
-            ON CONFLICT(class_name) DO NOTHING
-        `);
-        const updateClass = this.db.prepare(`
-            UPDATE ml_classes
-            SET total_words = total_words + ?, doc_count = doc_count + 1
-            WHERE class_name = ?
-        `);
-        const getClassId  = this.db.prepare('SELECT id FROM ml_classes WHERE class_name = ?');
-        const upsertWord  = this.db.prepare(`
-            INSERT INTO ml_word_counts(class_id, word, count) VALUES (?,?,?)
-            ON CONFLICT(class_id, word) DO UPDATE SET count = count + excluded.count
-        `);
-        const upsertFreq  = this.db.prepare(`
-            INSERT INTO ml_doc_freq(word, doc_frequency) VALUES (?,1)
-            ON CONFLICT(word) DO UPDATE SET doc_frequency = doc_frequency + 1
-        `);
-        const insertCorpus = this.db.prepare(
-            'INSERT INTO ml_corpus(class_name, tokens) VALUES (?,?)'
-        );
-        const countCorpus = this.db.prepare('SELECT COUNT(*) as n FROM ml_corpus');
-        const getOldest   = this.db.prepare(`
-            SELECT mc.id FROM ml_corpus mc
-            JOIN (
-                SELECT class_name, COUNT(*) as cnt FROM ml_corpus GROUP BY class_name ORDER BY cnt DESC LIMIT 1
-            ) top ON mc.class_name = top.class_name
-            ORDER BY mc.id ASC LIMIT 1
-        `);
-        const deleteCorpus = this.db.prepare('DELETE FROM ml_corpus WHERE id = ?');
-        const upsertMeta   = this.db.prepare(`
-            INSERT OR REPLACE INTO ml_metadata(id, total_docs, version, last_trained)
-            VALUES (1,?,2,?)
-        `);
-
-        const totalTfWords = Object.values(tf).reduce((s, v) => s + v, 0);
+        if (!this._mlStmt) this._prepareMlStatements();
+        const s = this._mlStmt;
+        const totalTfWords = Object.values(tf).reduce((a, v) => a + v, 0);
 
         this.db.transaction(() => {
-            upsertClass.run(className);
-            updateClass.run(totalTfWords, className);
-            const classId = getClassId.get(className)?.id;
+            s.upsertClass.run(className);
+            s.updateClass.run(totalTfWords, className);
+            const classId = s.getClassId.get(className)?.id;
             if (classId) {
                 for (const [word, count] of Object.entries(tf)) {
-                    upsertWord.run(classId, word, count);
+                    s.upsertWord.run(classId, word, count);
                 }
             }
-            for (const word of uniqueTokens) upsertFreq.run(word);
+            for (const word of uniqueTokens) s.upsertFreq.run(word);
 
-            insertCorpus.run(corpusEntry.className, corpusEntry.tokens);
-            if (countCorpus.get().n > maxCorpusSize) {
-                const old = getOldest.get();
-                if (old) deleteCorpus.run(old.id);
+            s.insertCorpus.run(corpusEntry.className, corpusEntry.tokens);
+            if (s.countCorpus.get().n > maxCorpusSize) {
+                const old = s.getOldest.get();
+                if (old) s.deleteCorpus.run(old.id);
             }
 
-            upsertMeta.run(totalDocs, lastTrained);
+            s.upsertMeta.run(totalDocs, lastTrained);
         })();
     }
 
