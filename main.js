@@ -658,27 +658,39 @@ const getDefaultOCRIndexPath = () => {
   return path.join(app.getPath('userData'), 'ocr-index.json');
 };
 
-// Cargar índice OCR desde archivo
-ipcMain.handle('load-ocr-index', async (event) => {
+// Cargar índice OCR — lee desde SQLite (ocr_documents)
+ipcMain.handle('load-ocr-index', async () => {
   try {
-    const indexPath = getOCRIndexPath();
-    console.log('[INFO] Cargando indice OCR desde:', indexPath);
-    
-    try {
-      const data = await fs.readFile(indexPath, 'utf8');
-      const parsed = JSON.parse(data);
-      console.log('[SUCCESS] Indice OCR cargado:', Object.keys(parsed).length, 'documentos');
-      return { success: true, data: parsed };
-    } catch (error) {
-      if (error.code === 'ENOENT') {
-        // El archivo no existe, devolver índice vacío
-        console.log('[INFO] Archivo de indice no existe, creando nuevo');
-        return { success: true, data: {} };
-      }
-      throw error;
+    const docs = ziloDb.getAllOcrDocuments();
+    if (!docs.success) return { success: true, data: {} };
+
+    const data = {};
+    for (const doc of docs.results) {
+      // searchText en mayúsculas para la búsqueda insensible a mayúsculas del buscador
+      const searchText = (doc.file_name + ' ' + doc.ocr_text + ' ' + doc.doc_type).toUpperCase();
+      data[doc.file_path] = {
+        fileName:   doc.file_name,
+        filePath:   doc.file_path,
+        ocrText:    doc.ocr_text,
+        docType:    doc.doc_type,
+        timestamp:  doc.timestamp,
+        searchText,
+      };
     }
+    console.log('[INFO] Índice OCR cargado desde SQLite:', Object.keys(data).length, 'documentos');
+    return { success: true, data };
   } catch (error) {
-    console.error('[ERROR] Error al cargar indice OCR:', error);
+    console.error('[ERROR] Error al cargar índice OCR desde SQLite:', error);
+    return { success: false, error: error.message, data: {} };
+  }
+});
+
+// Añadir un documento al índice OCR (SQLite)
+ipcMain.handle('add-ocr-document', async (event, { filePath, fileName, ocrText, docType }) => {
+  try {
+    return ziloDb.addOcrDocument(filePath, fileName, ocrText || '', docType || '');
+  } catch (error) {
+    console.error('[ERROR] Error al indexar documento:', error);
     return { success: false, error: error.message };
   }
 });

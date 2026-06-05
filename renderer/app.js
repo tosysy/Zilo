@@ -1474,9 +1474,10 @@ async function loadOCRIndex() {
 
 async function saveToOCRIndex(filePath, fileName, text, docType) {
     try {
-        ocrIndex[filePath] = { fileName, text, docType, timestamp: new Date().toISOString() };
-        await window.electronAPI.saveOCRIndex(ocrIndex);
-    } catch (e) {}
+        await window.electronAPI.addOcrDocument({ filePath, fileName, ocrText: text || '', docType: docType || '' });
+    } catch (e) {
+        console.warn('[OCRIndex] Error al guardar en base de datos:', e.message);
+    }
 }
 
 // =================================================================================

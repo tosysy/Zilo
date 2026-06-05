@@ -15,8 +15,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('read-pdf-file', filePath),
   openFile: (filePath) =>
     ipcRenderer.invoke('open-file', filePath),
+  loadOcrIndex: () =>
+    ipcRenderer.invoke('load-ocr-index'),
+  // Alias antiguo para compatibilidad con search-window.js
   loadOCRIndex: () =>
     ipcRenderer.invoke('load-ocr-index'),
+  addOcrDocument: (data) =>
+    ipcRenderer.invoke('add-ocr-document', data),
   saveOCRIndex: (indexData) =>
     ipcRenderer.invoke('save-ocr-index', indexData),
   getFilePath: (file) => getFilePath(file),
