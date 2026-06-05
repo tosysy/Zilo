@@ -85,6 +85,31 @@ async function _isExpertForType(typeName) {
     return false;
 }
 
+// Umbral de confirmaciones para considerar EXPERTA a una plantilla (por proveedor)
+const TEMPLATE_EXPERT_THRESHOLD = 10;
+let _tplExpertCache = null;
+function _invalidateTplCache() { _tplExpertCache = null; }
+async function _getTemplatesCached() {
+    if (!_tplExpertCache) {
+        try { _tplExpertCache = await window.electronAPI.getOcrTemplates() || []; }
+        catch (_) { _tplExpertCache = []; }
+    }
+    return _tplExpertCache;
+}
+
+/**
+ * Zilo es "experto" en una PLANTILLA concreta (un proveedor) cuando esa plantilla
+ * acumula ≥ TEMPLATE_EXPERT_THRESHOLD confirmaciones. El aprendizaje es por
+ * plantilla, NO por tipo: ser experto en SANVICOR no implica serlo en BASTOS.
+ */
+async function _isExpertForTemplate(templateId) {
+    if (!templateId) return false;
+    const tpls = await _getTemplatesCached();
+    const tpl  = tpls.find(t => t.id === templateId);
+    const confirmations = tpl ? (tpl.confirmations || 0) : 0;
+    return confirmations >= TEMPLATE_EXPERT_THRESHOLD;
+}
+
 // ── Búsqueda de texto en OCR ya extraído (sin re-OCR) ───────────────────────
 
 /**
@@ -438,7 +463,8 @@ async function processFile(file, fileId) {
             if (!renameText && text) {
                 renameText = await _extractByLearnedPattern(text, currentDocType.name);
             }
-            const expert = await _isExpertForType(currentDocType.name);
+            // Experto POR PLANTILLA (no por tipo): cada proveedor aprende por separado
+            const expert = await _isExpertForTemplate(tplId);
             if (expert) {
                 await processWithType(file, fileId, currentDocType, text, false, renameText, fromParts, tplId);
             } else {
@@ -454,7 +480,8 @@ async function processFile(file, fileId) {
             updateFileStatus(fileId, 'Detectando tipo...', 60);
             const matched = await detectDocumentType(file, text);
             if (matched && matched.confianza === 'high') {
-                const expert = await _isExpertForType(matched.type.name);
+                // Experto POR PLANTILLA del proveedor concreto detectado
+                const expert = await _isExpertForTemplate(matched.templateId);
                 if (expert) {
                     const src = matched.source === 'ml' ? `🤖 ML ${Math.round((matched.mlConfidence||0)*100)}%` : '🎯 Zonas';
                     updateFileStatus(fileId, `${src} — procesando...`, 65);
@@ -1762,7 +1789,7 @@ async function processWithType(file, fileId, type, text, autoDetected, renameTex
             } catch (_) {}
         }
         if (templateId) {
-            try { await window.electronAPI.incrementOcrConfirmations(templateId); } catch (_) {}
+            try { await window.electronAPI.incrementOcrConfirmations(templateId); _invalidateTplCache(); } catch (_) {}
         }
     } else {
         throw new Error(result.error);
@@ -1813,9 +1840,9 @@ async function processWatchedFile(fileData) {
 
         const errorFolder = localStorage.getItem('watch-error-folder');
 
-        // Solo auto-renombrar si: es experto Y (la detección vino de zona OCR O la confianza ML es suficiente)
+        // Solo auto-renombrar si Zilo es EXPERTO EN ESA PLANTILLA (proveedor)
         const expertAndConfident = matched?.confianza === 'high'
-            && await _isExpertForType(matched.type.name)
+            && await _isExpertForTemplate(matched.templateId)
             && (matched.source === 'zones' || (matched.mlConfidence || 0) >= 0.65);
 
         if (expertAndConfident) {
@@ -2035,7 +2062,17 @@ async function handleManualRenameConfirmed(data) {
                     } catch (_) {}
                 }
                 if (data.templateId) {
-                    try { await window.electronAPI.incrementOcrConfirmations(data.templateId); } catch (_) {}
+                    try {
+                        const r = await window.electronAPI.incrementOcrConfirmations(data.templateId);
+                        _invalidateTplCache();
+                        const conf = r?.confirmations || 0;
+                        const faltan = Math.max(0, 10 - conf);
+                        if (faltan > 0) {
+                            window.electronAPI.logToCmd(`📊 Plantilla confirmada ${conf}/10 veces. Le faltan ${faltan} confirmaciones para que renombre SOLA los documentos de ESTE proveedor.`);
+                        } else {
+                            window.electronAPI.logToCmd(`⭐ ¡Plantilla EXPERTA! (${conf} confirmaciones). A partir de ahora renombro automáticamente los documentos de ESTE proveedor.`);
+                        }
+                    } catch (_) {}
                 }
                 // Registrar patrón pendiente para el panel OCR Zonal
                 try {
