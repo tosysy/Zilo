@@ -14,5 +14,10 @@ contextBridge.exposeInMainWorld('ocrZonalAPI', {
     readPdf:               (p)    => ipcRenderer.invoke('read-pdf-file', p),
     selectPdf:             ()     => ipcRenderer.invoke('select-pdf-file'),
     closeWindow:           ()     => ipcRenderer.send('close-ocr-zonal-window'),
-    onThemeChanged:        (cb)   => ipcRenderer.on('theme-changed', (_, t) => cb(t))
+    onThemeChanged:        (cb)   => ipcRenderer.on('theme-changed', (_, t) => cb(t)),
+    // Asignación de tipo de documento al guardar plantilla
+    getDocTypes:           ()        => ipcRenderer.invoke('doc-types-get-all'),
+    createDocType:         (data)    => ipcRenderer.invoke('doc-types-create', data),
+    updateDocType:         (id, data)=> ipcRenderer.invoke('doc-types-update', { id, data }),
+    selectFolder:          ()        => ipcRenderer.invoke('select-folder')
 });

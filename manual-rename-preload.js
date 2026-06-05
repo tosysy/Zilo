@@ -18,4 +18,12 @@ contextBridge.exposeInMainWorld('manualRenameAPI', {
 
     // Leer PDF para previsualización
     readPdfFile: (filePath) => ipcRenderer.invoke('read-pdf-file', filePath),
+
+    // ── Creación de plantillas desde la ventana de renombrado ─────────────────
+    saveOcrTemplate:  (data)      => ipcRenderer.invoke('ocr-zonal-save-template', data),
+    getOcrTemplates:  ()          => ipcRenderer.invoke('ocr-zonal-get-templates'),
+    getDocTypes:      ()          => ipcRenderer.invoke('doc-types-get-all'),
+    createDocType:    (data)      => ipcRenderer.invoke('doc-types-create', data),
+    updateDocType:    (id, data)  => ipcRenderer.invoke('doc-types-update', { id, data }),
+    selectFolder:     ()          => ipcRenderer.invoke('select-folder'),
 });
