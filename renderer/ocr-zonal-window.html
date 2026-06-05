@@ -532,6 +532,9 @@ function genPartId() {
     return 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
 }
 
+// Apertura desde el renombrado manual (con PDF pre-cargado)
+let preloadedFromManual = false;
+
 // Zoom
 let userZoom    = 1.0;
 const ZOOM_MIN  = 0.3;
@@ -595,6 +598,18 @@ function resetForm() {
 // ── Init ──────────────────────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', () => {
     loadTemplatesList();
+
+    // PDF pre-cargado (abierto desde el renombrado manual): cargar y entrar al formulario
+    window.ocrZonalAPI.onPreloadPdf(async ({ pdfPath }) => {
+        if (!pdfPath) return;
+        preloadedFromManual = true;
+        resetForm();
+        showFormMode();
+        await loadPDF(pdfPath);
+        // Cambiar el texto del botón guardar para reflejar que procesará el documento
+        const btn = document.getElementById('btn-done-window');
+        if (btn) btn.textContent = '💾 Guardar y procesar documento';
+    });
 
     // Visor PDF
     document.getElementById('btn-load-pdf').addEventListener('click', selectAndLoadPDF);
@@ -1339,18 +1354,23 @@ function updateRenamePreview() {
     const val = document.getElementById('rp-value');
     if (!renameParts.length) { box.style.display = 'none'; return; }
     box.style.display = 'block';
-    const preview = renameParts.map(p => {
-        if (p.type === 'text') return p.value || '';
-        if (p.type === 'text-search') {
-            if (!p.before) return '';
-            const tag = p.label || 'búsqueda';
-            return `[${tag}]`;
-        }
-        const raw = p._preview || (p.rect ? '?' : '');
-        return applyTransformPreview(raw, p.transform || 'none');
-    }).join('').trim();
+    const preview = buildPreviewName();
     val.textContent  = preview ? `${preview}.pdf` : '—';
     val.className    = `rp-value${preview ? '' : ' empty'}`;
+}
+
+/**
+ * Construye el nombre tal y como se ve en la vista previa (texto fijo + valores OCR
+ * detectados). Las partes de búsqueda no son resolubles aquí y se omiten.
+ * Devuelve el nombre SIN extensión, o '' si no hay nada útil.
+ */
+function buildPreviewName() {
+    return renameParts.map(p => {
+        if (p.type === 'text') return p.value || '';
+        if (p.type === 'text-search') return '';   // se resolverá al procesar
+        const raw = p._preview || '';
+        return applyTransformPreview(raw, p.transform || 'none');
+    }).join('').replace(/\s+/g, ' ').trim();
 }
 
 // ── Estado del formulario ─────────────────────────────────────────────────────
@@ -1483,14 +1503,36 @@ async function saveTemplate() {
     }
 
     // ── Asignar a tipo de documento (si el usuario eligió uno) ────────────────
+    let assignedTypeId = null;
     try {
-        await assignTemplateToType(result.id);
+        assignedTypeId = await assignTemplateToType(result.id);
     } catch (e) {
         btn.disabled = false;
         btn.textContent = prevText;
         showFormError(['Plantilla guardada, pero falló la asignación de tipo: ' + e.message]);
         await loadTemplatesList();
         return;
+    }
+
+    // ── Abierto desde el renombrado manual → procesar el documento y cerrar ────
+    if (preloadedFromManual) {
+        if (!assignedTypeId) {
+            // Sin tipo asignado no se puede archivar: exigir asignación
+            btn.disabled = false;
+            btn.textContent = prevText;
+            showFormError(['Asigna la plantilla a un tipo de documento (con carpeta) para poder procesar el archivo.']);
+            return;
+        }
+        // Pedir al proceso principal que procese el documento con este tipo y cierre.
+        // Pasamos el nombre EXACTO de la vista previa (valores que el usuario acaba de ver),
+        // para no depender de un nuevo OCR sobre un documento escaneado poco fiable.
+        const finalName = buildPreviewName();
+        window.ocrZonalAPI.finalizeFromManual({
+            typeId:     assignedTypeId,
+            templateId: result.id,
+            finalName:  finalName ? finalName + '.pdf' : '',
+        });
+        return;   // la ventana se cerrará desde el proceso principal
     }
 
     btn.disabled = false;
@@ -1507,9 +1549,9 @@ async function saveTemplate() {
  */
 async function assignTemplateToType(templateId) {
     const sel = document.getElementById('tpl-assign-type');
-    if (!sel) return;
+    if (!sel) return null;
     const choice = sel.value;
-    if (!choice) return;  // "No asignar"
+    if (!choice) return null;  // "No asignar"
 
     if (choice === '__new__') {
         const typeName   = (document.getElementById('tpl-assign-new-name').value || '').trim().toUpperCase();
@@ -1523,6 +1565,7 @@ async function assignTemplateToType(templateId) {
             ocr_template_ids: [templateId],
         });
         if (!res?.success) throw new Error(res?.error || 'No se pudo crear el tipo');
+        return res.id;   // id del tipo nuevo
     } else {
         const typeId    = parseInt(choice);
         const types     = await window.ocrZonalAPI.getDocTypes() || [];
@@ -1534,6 +1577,7 @@ async function assignTemplateToType(templateId) {
             folder:           existType?.folder || null,
             ocr_template_ids: [...currentIds, templateId],
         });
+        return typeId;
     }
 }
 

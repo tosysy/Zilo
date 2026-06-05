@@ -26,4 +26,9 @@ contextBridge.exposeInMainWorld('manualRenameAPI', {
     createDocType:    (data)      => ipcRenderer.invoke('doc-types-create', data),
     updateDocType:    (id, data)  => ipcRenderer.invoke('doc-types-update', { id, data }),
     selectFolder:     ()          => ipcRenderer.invoke('select-folder'),
+
+    // Abrir el Motor OCR Zonal con el PDF actual pre-cargado
+    openOcrZonalForFile: (pdfPath) => ipcRenderer.invoke('open-ocr-zonal-window', { pdfPath, origin: 'manual-rename' }),
+    // Aviso de que se cerró el Motor OCR Zonal (para recargar tipos/plantillas)
+    onOcrZonalClosed:    (cb)      => ipcRenderer.on('ocr-zonal-closed', () => cb()),
 });

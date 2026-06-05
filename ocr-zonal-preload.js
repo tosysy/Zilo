@@ -15,6 +15,10 @@ contextBridge.exposeInMainWorld('ocrZonalAPI', {
     selectPdf:             ()     => ipcRenderer.invoke('select-pdf-file'),
     closeWindow:           ()     => ipcRenderer.send('close-ocr-zonal-window'),
     onThemeChanged:        (cb)   => ipcRenderer.on('theme-changed', (_, t) => cb(t)),
+    // PDF pre-cargado al abrir desde el renombrado manual
+    onPreloadPdf:          (cb)   => ipcRenderer.on('preload-pdf', (_, data) => cb(data)),
+    // Procesar el documento con el tipo creado y cerrar (vuelve al renombrado manual)
+    finalizeFromManual:    (data) => ipcRenderer.send('ocr-zonal-finalize-manual', data),
     // Asignación de tipo de documento al guardar plantilla
     getDocTypes:           ()        => ipcRenderer.invoke('doc-types-get-all'),
     createDocType:         (data)    => ipcRenderer.invoke('doc-types-create', data),

@@ -32,6 +32,7 @@ window.addEventListener('DOMContentLoaded', () => {
     setupButtons();
     setupDrawCanvas();
     window.manualRenameAPI.onFileData(handleFileData);
+    window.manualRenameAPI.onOcrZonalClosed(handleOcrZonalClosed);
 });
 
 function applyStoredTheme() {
@@ -52,6 +53,7 @@ async function handleFileData(data) {
     docTypes          = data.docTypes     || [];
     allTemplates      = data.templates    || [];
     suggestedFileName = data.suggestedFileName || '';
+    correctedRects    = {};   // limpiar zonas redibujadas del documento anterior
 
     document.getElementById('orig-name').textContent = data.fileName || '—';
 
@@ -64,9 +66,18 @@ async function handleFileData(data) {
         badge.style.display = 'none';
     }
 
-    // Mensaje de alerta (solo en modo manual sin sugerencia)
-    document.getElementById('alert-box').style.display =
-        (!suggestedFileName && (data.currentMode === 'auto' || data.currentMode === 'manual')) ? 'block' : 'none';
+    // Mensaje de alerta
+    const alertBox = document.getElementById('alert-box');
+    if (data.isHistoryCorrection || data.currentMode === 'history') {
+        alertBox.style.display = 'block';
+        alertBox.style.background = '#fef3c7';
+        alertBox.style.borderColor = '#f59e0b';
+        alertBox.style.color = '#92400e';
+        alertBox.innerHTML = '✏️ <b>Corrigiendo un archivo ya procesado.</b> Marca la zona correcta en el PDF si lee mal y confirma. Zilo aprenderá para no repetir el fallo.';
+    } else {
+        alertBox.style.display =
+            (!suggestedFileName && (data.currentMode === 'auto' || data.currentMode === 'manual')) ? 'block' : 'none';
+    }
 
     if (suggestedFileName) {
         renderSuggestionMode(data.detectedType);
@@ -76,6 +87,17 @@ async function handleFileData(data) {
     }
 
     await loadPdf(data.filePath);
+
+    // Calcular el desplazamiento del documento por el NIF (para alinear las zonas)
+    await computeZoneOffset();
+
+    // El PDF ya está cargado → resaltar las zonas (ya desplazadas) de la plantilla
+    renderOverlay();
+
+    // Pre-rellenar campos OCR (las zonas se leen ya desplazadas)
+    if (!inSuggestionMode && activeTpl?.renameParts) {
+        prefillOcrFieldsFromTemplate(activeTpl.renameParts.filter(p => p.type === 'ocr'));
+    }
 }
 
 // ── Modo sugerencia ───────────────────────────────────────────────────────────
@@ -251,10 +273,68 @@ function ensureCreateTemplateButton() {
     btn.id = 'btn-open-tpl-mode';
     btn.className = 'btn-create-template';
     btn.innerHTML = '🏗️ Crear plantilla para este documento';
-    btn.title = 'Enseña a Zilo a reconocer y renombrar este tipo de documento automáticamente';
-    btn.addEventListener('click', enterTemplateMode);
+    btn.title = 'Abre el Motor OCR Zonal con este documento cargado para crear su plantilla';
+    btn.addEventListener('click', openOcrZonalForThisDoc);
 
     dyn.insertAdjacentElement('afterend', btn);
+}
+
+/** Abre el Motor OCR Zonal con el documento actual ya cargado. */
+async function openOcrZonalForThisDoc() {
+    const filePath = fileData?.filePath;
+    if (!filePath) { alert('No hay documento cargado.'); return; }
+    try {
+        await window.manualRenameAPI.openOcrZonalForFile(filePath);
+    } catch (e) {
+        alert('No se pudo abrir el Motor OCR Zonal: ' + e.message);
+    }
+}
+
+/**
+ * Cuando se cierra el Motor OCR Zonal, recargar tipos y plantillas para
+ * reflejar la plantilla recién creada, y re-evaluar el documento actual.
+ */
+async function handleOcrZonalClosed() {
+    try {
+        docTypes     = await window.manualRenameAPI.getDocTypes()    || [];
+        allTemplates = await window.manualRenameAPI.getOcrTemplates() || [];
+    } catch (_) {}
+
+    // Elegir el tipo cuya plantilla mejor identifica este documento
+    const best = autoSelectBestType();
+    const preselect = best?.id || activeType?.id || fileData?.detectedType;
+
+    if (inSuggestionMode) {
+        switchToEditMode();   // construye el formulario completo
+    }
+    // (re)construir el selector con el mejor tipo preseleccionado
+    buildTypeSelector(preselect);
+
+    // Re-ejecutar prefill de campos OCR con la nueva plantilla
+    if (activeTpl?.renameParts) {
+        prefillOcrFieldsFromTemplate(activeTpl.renameParts.filter(p => p.type === 'ocr'));
+    }
+}
+
+/**
+ * Busca el tipo cuya plantilla de identificación mejor coincide con el texto
+ * OCR del documento actual. Devuelve null si ninguna supera el 40%.
+ */
+function autoSelectBestType() {
+    const ocr = (fileData?.ocrText || '').toLowerCase();
+    if (!ocr) return null;
+    let bestType = null, bestScore = 0.4;   // umbral mínimo
+    for (const t of docTypes) {
+        for (const id of getTypeTemplateIds(t)) {
+            const tpl = allTemplates.find(x => x.id === id);
+            const ref = (tpl?.identification?.text || '').toLowerCase();
+            const words = ref.split(/\s+/).filter(w => w.length >= 3);
+            if (!words.length) continue;
+            const score = words.filter(w => ocr.includes(w)).length / words.length;
+            if (score > bestScore) { bestScore = score; bestType = t; }
+        }
+    }
+    return bestType;
 }
 
 function onTypeChanged() {
@@ -266,6 +346,9 @@ function onTypeChanged() {
     partValues = {};
     renderDynForm();
     updatePreview();
+    renderOverlay();
+    // Recalcular el desplazamiento del NIF para esta plantilla (async, no bloquea)
+    computeZoneOffset().then(() => renderOverlay()).catch(() => {});
 }
 
 // ── Selección de plantilla ────────────────────────────────────────────────────
@@ -277,6 +360,13 @@ function pickBestTemplate(type) {
     if (!type) return null;
     const ids = getTypeTemplateIds(type);
     if (!ids.length) return null;
+
+    // Si la detección automática (zona naranja) ya eligió una plantilla, respetarla
+    const suggestedId = fileData?.suggestedTemplateId;
+    if (suggestedId && ids.includes(suggestedId)) {
+        const t = allTemplates.find(x => x.id === suggestedId);
+        if (t) return t;
+    }
 
     const ocrText = (fileData?.ocrText || '').toLowerCase();
 
@@ -304,12 +394,65 @@ function getTypeTemplateIds(type) {
     return [];
 }
 
+/**
+ * Si el tipo activo tiene varias plantillas (p.ej. una por proveedor), muestra un
+ * desplegable para que el usuario elija/corrija cuál usar. Zilo preselecciona la
+ * que mejor encaja según la zona de identificación naranja, pero el usuario manda.
+ */
+function renderTemplateSelector(container) {
+    if (!activeType) return;
+    const ids = getTypeTemplateIds(activeType);
+    if (ids.length < 2) return;   // con una sola plantilla no hay nada que elegir
+
+    const tpls = ids.map(id => allTemplates.find(t => t.id === id)).filter(Boolean);
+    if (tpls.length < 2) return;
+
+    const card = document.createElement('div');
+    card.className = 'card';
+    const lbl = document.createElement('div');
+    lbl.className = 'field-label';
+    lbl.textContent = 'Plantilla / proveedor';
+    card.appendChild(lbl);
+
+    const sel = document.createElement('select');
+    sel.id = 'sel-template';
+    tpls.forEach(t => {
+        const opt = document.createElement('option');
+        opt.value = t.id;
+        opt.textContent = t.nombre || t.id;
+        if (activeTpl && t.id === activeTpl.id) opt.selected = true;
+        sel.appendChild(opt);
+    });
+    sel.addEventListener('change', () => {
+        activeTpl  = allTemplates.find(t => t.id === sel.value) || null;
+        partValues = {};
+        renderDynForm();
+        updatePreview();
+        renderOverlay();   // resaltar las zonas de la nueva plantilla
+        // Re-ejecutar prefill con la plantilla elegida
+        if (activeTpl?.renameParts) {
+            prefillOcrFieldsFromTemplate(activeTpl.renameParts.filter(p => p.type === 'ocr'));
+        }
+    });
+    card.appendChild(sel);
+
+    const hint = document.createElement('div');
+    hint.style.cssText = 'font-size:.72rem;color:#888;margin-top:5px;line-height:1.4';
+    hint.textContent = 'Zilo eligió la más parecida según el membrete. Cámbiala si no es correcta.';
+    card.appendChild(hint);
+
+    container.appendChild(card);
+}
+
 // ── Formulario dinámico ───────────────────────────────────────────────────────
 function renderDynForm() {
     const container = document.getElementById('dyn-form');
     container.innerHTML = '';
 
     if (!activeType) return;
+
+    // Selector de plantilla (cuando el tipo tiene varias, ej: un proveedor por plantilla)
+    renderTemplateSelector(container);
 
     const parts = activeTpl?.renameParts;
 
@@ -355,7 +498,7 @@ function renderDynForm() {
 
                 const lbl    = document.createElement('label');
                 lbl.htmlFor  = `inp-part-${p.id}`;
-                lbl.textContent = p.label || 'Campo OCR';
+                lbl.textContent = p.label || 'Dato a extraer (nº, referencia…)';
                 if (p.transform && p.transform !== 'none') {
                     lbl.textContent += ` (${transformLabel(p.transform)})`;
                 }
@@ -374,12 +517,22 @@ function renderDynForm() {
                     if (e.key === 'Enter') confirmRename();
                 });
 
+                // Botón para marcar/ajustar la zona OCR en el PDF (herramienta zonal)
+                const drawBtn = document.createElement('button');
+                drawBtn.type = 'button';
+                drawBtn.className = 'btn-correct-zone';
+                drawBtn.id = `btn-correct-${p.id}`;
+                drawBtn.textContent = '✏️ ¿Lee mal? Marca aquí la zona correcta en el PDF';
+                drawBtn.title = 'Dibuja un recuadro sobre el dato correcto en el PDF. Zilo aprenderá esa posición y dejará de usar la equivocada.';
+                drawBtn.addEventListener('click', () => startCorrectionDraw(p));
+
                 const errSpan = document.createElement('div');
                 errSpan.className = 'error-msg';
                 errSpan.id = `err-part-${p.id}`;
 
                 row2.appendChild(lbl);
                 row2.appendChild(inp);
+                row2.appendChild(drawBtn);
                 row2.appendChild(errSpan);
                 inputsDiv.appendChild(row2);
             });
@@ -388,6 +541,9 @@ function renderDynForm() {
         }
 
         container.appendChild(card);
+
+        // Pre-rellenar los campos OCR ejecutando las zonas de la plantilla
+        prefillOcrFieldsFromTemplate(ocrParts);
 
         // Focus en primer input OCR
         setTimeout(() => {
@@ -573,6 +729,16 @@ function confirmRename() {
         }
     }
 
+    // Zonas redibujadas manualmente por el usuario → el ML aprende la posición exacta
+    const correctedForLearning = [];
+    if (activeTpl?.renameParts) {
+        for (const p of activeTpl.renameParts) {
+            if (p.type === 'ocr' && correctedRects[p.id]) {
+                correctedForLearning.push({ partLabel: p.label || p.id, page: p.page || 0, rect: correctedRects[p.id] });
+            }
+        }
+    }
+
     window.manualRenameAPI.confirmRename({
         selectedTypeId:   activeType.id,
         selectedType:     activeType.name,
@@ -580,7 +746,8 @@ function confirmRename() {
         ocrText:          fileData?.ocrText || '',
         templateId:       activeTpl?.id || null,
         destinationFolder: activeType.folder || '',
-        partValues:       partValuesForLearning,   // para aprendizaje de posición
+        partValues:       partValuesForLearning,    // para aprendizaje de posición (capa de texto)
+        correctedRects:   correctedForLearning,     // zonas dibujadas a mano (posición exacta)
     });
 }
 
@@ -692,6 +859,105 @@ function setupPan() {
     });
 }
 
+// ── Auto-enderezado (mismo algoritmo que el procesamiento) ─────────────────────
+let pdfSkewAngle = 0;   // ángulo detectado del documento actual
+let zoneOffset   = { dx: 0, dy: 0 };  // desplazamiento global calculado por el NIF
+
+// ── Registro por NIF: calcular cuánto se ha desplazado el documento ───────────
+function mrwExtractCifs(text) {
+    const out = [];
+    const norm = (text || '').toUpperCase();
+    const re = /[A-Z]?\s?-?\s?\d[\d.\-\s]{6,10}\d[A-Z]?/g;
+    let m; while ((m = re.exec(norm)) !== null) {
+        const d = m[0].replace(/[^0-9]/g, '');
+        if (d.length >= 7 && d.length <= 9) out.push(d);
+    }
+    return [...new Set(out)];
+}
+function mrwDigitSubseq(exp, act) {
+    if (!exp || !act) return 0;
+    if (act.includes(exp)) return 1;
+    let mm = 0, j = 0;
+    for (let i = 0; i < act.length && j < exp.length; i++) if (act[i] === exp[j]) { mm++; j++; }
+    return mm / exp.length;
+}
+
+/** Calcula el desplazamiento del documento buscando el CIF cerca de la zona naranja. */
+async function computeZoneOffset() {
+    zoneOffset = { dx: 0, dy: 0 };
+    const idRect = activeTpl?.identification?.rect;
+    if (!idRect || !pdfDoc) return;
+    const exps = [
+        ...mrwExtractCifs(activeTpl.identification?.text || ''),
+        ...((activeTpl.knownCifs || []).map(c => String(c).replace(/[^0-9]/g, ''))),
+    ].filter(d => d.length >= 7);
+    if (!exps.length) return;
+
+    const dh = idRect.h, dw = idRect.w;
+    const ySteps = [0, 0.6, -0.6, 1.2, -1.2, 1.8, -1.8];
+    const xSteps = [0, 0.5, -0.5, 1, -1];
+    let best = { dx: 0, dy: 0, score: 0 }, done = false;
+    for (const sy of ySteps) {
+        if (done) break;
+        for (const sx of xSteps) {
+            const r = {
+                x: Math.max(0, Math.min(0.98 - dw, idRect.x + sx * dw)),
+                y: Math.max(0, Math.min(0.98 - dh, idRect.y + sy * dh)),
+                w: dw, h: dh,
+            };
+            const txt = await ocrZoneManual(r, { numeric: true });
+            const d = txt.replace(/[^0-9]/g, '');
+            if (d.length < 5) continue;
+            let sim = 0; for (const e of exps) sim = Math.max(sim, mrwDigitSubseq(e, d));
+            if (sim > best.score) { best = { dx: r.x - idRect.x, dy: r.y - idRect.y, score: sim }; if (sim >= 0.99) { done = true; break; } }
+        }
+    }
+    if (best.score >= 0.85 && (Math.abs(best.dx) > 0.002 || Math.abs(best.dy) > 0.002)) {
+        zoneOffset = { dx: best.dx, dy: best.dy };
+    }
+}
+
+function detectSkewAngle(srcCanvas) {
+    try {
+        const targetW = 500;
+        const scale = Math.min(1, targetW / srcCanvas.width);
+        const w = Math.max(1, Math.round(srcCanvas.width * scale));
+        const h = Math.max(1, Math.round(srcCanvas.height * scale));
+        const c = document.createElement('canvas'); c.width = w; c.height = h;
+        const ctx = c.getContext('2d'); ctx.drawImage(srcCanvas, 0, 0, w, h);
+        const px = ctx.getImageData(0, 0, w, h).data;
+        const dark = new Uint8Array(w * h);
+        for (let i = 0; i < w * h; i++) {
+            const g = 0.299*px[i*4] + 0.587*px[i*4+1] + 0.114*px[i*4+2];
+            dark[i] = g < 140 ? 1 : 0;
+        }
+        const cx = w / 2;
+        const variance = (a) => {
+            const tan = Math.tan(a * Math.PI / 180);
+            const proj = new Float64Array(h);
+            for (let y = 0; y < h; y++) for (let x = 0; x < w; x++)
+                if (dark[y*w+x]) { const ny = Math.round(y + (x-cx)*tan); if (ny>=0&&ny<h) proj[ny]++; }
+            let mean = 0; for (let y=0;y<h;y++) mean += proj[y]; mean /= h;
+            let v = 0; for (let y=0;y<h;y++){ const d = proj[y]-mean; v += d*d; } return v;
+        };
+        const base = variance(0); let bestA = 0, bestS = base;
+        for (let a=-8;a<=8;a+=0.5){ if(a===0)continue; const v=variance(a); if(v>bestS){bestS=v;bestA=a;} }
+        if (bestA !== 0 && Math.abs(bestA) >= 0.5 && bestS > base * 1.12) return bestA;
+    } catch (_) {}
+    return 0;
+}
+
+function deskewCanvas(srcCanvas, angleDeg) {
+    if (!angleDeg || Math.abs(angleDeg) < 0.5) return srcCanvas;
+    const w = srcCanvas.width, h = srcCanvas.height;
+    const c = document.createElement('canvas'); c.width = w; c.height = h;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = 'white'; ctx.fillRect(0, 0, w, h);
+    ctx.translate(w/2, h/2); ctx.rotate(-angleDeg * Math.PI/180); ctx.translate(-w/2, -h/2);
+    ctx.drawImage(srcCanvas, 0, 0);
+    return c;
+}
+
 // ── PDF ───────────────────────────────────────────────────────────────────────
 async function loadPdf(filePath) {
     if (!filePath) return;
@@ -700,6 +966,17 @@ async function loadPdf(filePath) {
         if (!res?.success || !res.data) return;
         pdfDoc = await pdfjsLib.getDocument({ data: res.data }).promise;
         pdfZoom = 1.0;
+
+        // Detectar la inclinación una vez (sobre un render de referencia)
+        pdfSkewAngle = 0;
+        try {
+            const p1 = await pdfDoc.getPage(1);
+            const vp = p1.getViewport({ scale: 1.5 });
+            const tmp = document.createElement('canvas'); tmp.width = vp.width; tmp.height = vp.height;
+            await p1.render({ canvasContext: tmp.getContext('2d'), viewport: vp }).promise;
+            pdfSkewAngle = detectSkewAngle(tmp);
+        } catch (_) {}
+
         await renderPage();
     } catch (e) {
         console.error('[PDF] Error al cargar:', e);
@@ -720,7 +997,16 @@ async function renderPage() {
         canvas.height  = viewport.height;
         canvas.style.width  = (viewport.width  / DPR) + 'px';
         canvas.style.height = (viewport.height / DPR) + 'px';
-        await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+
+        if (pdfSkewAngle) {
+            // Renderizar a un temporal y dibujar enderezado en el canvas visible
+            const tmp = document.createElement('canvas'); tmp.width = viewport.width; tmp.height = viewport.height;
+            await page.render({ canvasContext: tmp.getContext('2d'), viewport }).promise;
+            const straight = deskewCanvas(tmp, pdfSkewAngle);
+            canvas.getContext('2d').drawImage(straight, 0, 0);
+        } else {
+            await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+        }
         document.getElementById('zoom-label').textContent = Math.round(pdfZoom * 100) + '%';
 
         // Sincronizar tamaño del draw canvas con el pdf canvas
@@ -737,13 +1023,19 @@ async function renderPage() {
 
 // ── Estado del modo plantilla ─────────────────────────────────────────────────
 let tplMode       = false;   // true = modo creación de plantilla activo
-let drawingFor    = null;    // 'id' | 'part' | null
+let drawingFor    = null;    // 'id' | 'ocr-part' | null
 let isDrawing     = false;
 let drawStart     = { x: 0, y: 0 };
 let drawCurrent   = { x: 0, y: 0 };
 let tplIdZone     = null;    // { rect, text }
-let tplPartZone   = null;    // { rect, text }
-let tplNewTypeFolder = '';   // carpeta para nuevo tipo (si se elige crear uno)
+let tplParts      = [];      // [{ id, type:'text'|'ocr'|'text-search', value?, rect?, label?, before?, after?, transform?, _preview?, _loading? }]
+let tplPendingPartId = null; // id de la parte OCR esperando que se dibuje su zona
+let correctionPart = null;   // parte OCR del formulario que se está corrigiendo dibujando zona
+let correctedRects = {};     // { partId: rect } zonas redibujadas por el usuario (para aprendizaje)
+
+function genTplPartId() {
+    return 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+}
 
 // ── Canvas de dibujo ──────────────────────────────────────────────────────────
 
@@ -795,6 +1087,12 @@ function setupDrawCanvas() {
     document.getElementById('btn-cancel-part').addEventListener('click', () => cancelDrawing());
 }
 
+function ocrIndexOfPart(partId) {
+    let idx = 0;
+    for (const p of tplParts) { if (p.type === 'ocr') { idx++; if (p.id === partId) return idx; } }
+    return idx;
+}
+
 function getRelPos(e, canvas) {
     const r = canvas.getBoundingClientRect();
     return {
@@ -834,8 +1132,37 @@ function renderOverlay() {
         }
     };
 
-    if (tplIdZone?.rect)   drawZoneRect(tplIdZone.rect,   '#f59e0b', 'rgba(245,158,11,0.15)', '🔍 Identificación');
-    if (tplPartZone?.rect) drawZoneRect(tplPartZone.rect, '#10b981', 'rgba(16,185,129,0.15)', '📝 Dato a extraer');
+    if (tplMode) {
+        // ── Modo creación de plantilla: zonas que el usuario está dibujando ────
+        if (tplIdZone?.rect) drawZoneRect(tplIdZone.rect, '#f59e0b', 'rgba(245,158,11,0.15)', '🔍 Identificación');
+        let ocrIdx = 0;
+        for (const p of tplParts) {
+            if (p.type !== 'ocr' || !p.rect) continue;
+            ocrIdx++;
+            drawZoneRect(p.rect, '#10b981', 'rgba(16,185,129,0.15)',
+                p.label ? `OCR ${ocrIdx}: ${p.label}` : `OCR ${ocrIdx}`);
+        }
+    } else if (activeTpl) {
+        // ── Modo normal/corrección: zonas DESPLAZADAS por el offset del NIF ────
+        const off = zoneOffset || { dx: 0, dy: 0 };
+        const shift = (r) => ({
+            x: Math.max(0, Math.min(0.98 - r.w, r.x + off.dx)),
+            y: Math.max(0, Math.min(0.98 - r.h, r.y + off.dy)),
+            w: r.w, h: r.h,
+        });
+        const idr = activeTpl.identification?.rect;
+        if (idr && (activeTpl.identification.page || 0) === 0) {
+            drawZoneRect(shift(idr), '#f59e0b', 'rgba(245,158,11,0.15)', '🔍 NIF/Identificación');
+        }
+        let ocrIdx = 0;
+        for (const p of (activeTpl.renameParts || [])) {
+            if (p.type !== 'ocr' || !p.rect) continue;
+            if ((p.page || 0) !== 0) continue;
+            ocrIdx++;
+            drawZoneRect(shift(p.rect), '#10b981', 'rgba(16,185,129,0.15)',
+                p.label ? `${p.label}` : `Dato ${ocrIdx}`);
+        }
+    }
 
     if (isDrawing) {
         const r = normRect(drawStart, drawCurrent);
@@ -848,76 +1175,214 @@ function renderOverlay() {
 }
 
 function cancelDrawing() {
+    const wasCorrection = !!correctionPart;
     drawingFor = null;
+    tplPendingPartId = null;
+    correctionPart = null;
     isDrawing  = false;
     const draw = document.getElementById('draw-canvas');
     draw.style.cursor = 'default';
     draw.classList.remove('drawing-active');
-    document.getElementById('hint-id').classList.remove('active');
-    document.getElementById('hint-part').classList.remove('active');
+    document.getElementById('hint-id')?.classList.remove('active');
+    document.getElementById('hint-part')?.classList.remove('active');
+    if (!wasCorrection) renderTplParts();
 }
 
-function startDrawing(zone) {
-    drawingFor = zone;
+/** Inicia el dibujo de una zona para CORREGIR un campo OCR del formulario. */
+function startCorrectionDraw(part) {
+    if (!pdfDoc) { alert('No hay PDF cargado.'); return; }
+    correctionPart = part;
+    drawingFor = 'correct-part';
+    tplPendingPartId = null;
     const draw = document.getElementById('draw-canvas');
     draw.style.cursor = 'crosshair';
     draw.classList.add('drawing-active');
-    document.getElementById('hint-id').classList.toggle('active',   zone === 'id');
-    document.getElementById('hint-part').classList.toggle('active', zone === 'part');
+    document.getElementById('hint-id')?.classList.remove('active');
+    document.getElementById('hint-part')?.classList.add('active');
+    const btn = document.getElementById(`btn-correct-${part.id}`);
+    if (btn) btn.textContent = '⏳ Dibuja la zona en el PDF…';
+}
+
+/**
+ * Ejecuta las zonas OCR de la plantilla sobre el documento actual y pre-rellena
+ * los campos que estén vacíos. Solo rellena lo que el OCR consiga leer.
+ */
+async function prefillOcrFieldsFromTemplate(ocrParts) {
+    if (!pdfDoc || !ocrParts?.length) return;
+    const off = zoneOffset || { dx: 0, dy: 0 };
+    for (const p of ocrParts) {
+        if (!p.rect) continue;
+        const inp = document.getElementById(`inp-part-${p.id}`);
+        if (!inp || inp.value.trim()) continue;   // no pisar lo que ya hay
+        // Aplicar el mismo desplazamiento del NIF a la zona del dato
+        const r = {
+            x: Math.max(0, Math.min(0.98 - p.rect.w, p.rect.x + off.dx)),
+            y: Math.max(0, Math.min(0.98 - p.rect.h, p.rect.y + off.dy)),
+            w: p.rect.w, h: p.rect.h,
+        };
+        try {
+            let text = await ocrZoneManual(r, { numeric: partIsNumeric(p) });
+            text = applyTransform(text, p.transform);
+            if (text) {
+                inp.value = text;
+                inp.dispatchEvent(new Event('input'));
+            }
+        } catch (_) {}
+    }
+}
+
+/** Inicia el dibujo de la zona de identificación. */
+function startDrawingId() {
+    drawingFor = 'id';
+    tplPendingPartId = null;
+    const draw = document.getElementById('draw-canvas');
+    draw.style.cursor = 'crosshair';
+    draw.classList.add('drawing-active');
+    document.getElementById('hint-id').classList.add('active');
+    document.getElementById('hint-part').classList.remove('active');
+}
+
+/** Inicia el dibujo de la zona de una parte OCR concreta. */
+function startDrawingPart(partId) {
+    drawingFor = 'ocr-part';
+    tplPendingPartId = partId;
+    const draw = document.getElementById('draw-canvas');
+    draw.style.cursor = 'crosshair';
+    draw.classList.add('drawing-active');
+    document.getElementById('hint-id').classList.remove('active');
+    document.getElementById('hint-part').classList.add('active');
+    renderTplParts();
 }
 
 async function handleZoneDrawn(rect) {
     const which = drawingFor;
+    const pid   = tplPendingPartId;
+    const corrPart = correctionPart;
     cancelDrawing();
 
-    const runId   = which === 'id'   ? 'tpl-ocr-id-running'   : 'tpl-ocr-part-running';
-    const prevId  = which === 'id'   ? 'tpl-id-preview'       : 'tpl-part-preview';
-    const cardId  = which === 'id'   ? 'tpl-id-zone-card'     : 'tpl-part-zone-card';
-    const statId  = which === 'id'   ? 'tpl-id-status'        : 'tpl-part-status';
+    // ── Corrección de un campo OCR del formulario ─────────────────────────────
+    if (which === 'correct-part' && corrPart) {
+        const inp = document.getElementById(`inp-part-${corrPart.id}`);
+        const btn = document.getElementById(`btn-correct-${corrPart.id}`);
+        if (btn) btn.textContent = '⏳ Analizando…';
 
-    const runEl  = document.getElementById(runId);
-    const prevEl = document.getElementById(prevId);
-    const cardEl = document.getElementById(cardId);
+        let text = await ocrZoneManual(rect, { numeric: partIsNumeric(corrPart) });
+        text = applyTransform(text, corrPart.transform);
 
-    if (runEl)  runEl.classList.add('visible');
-    if (prevEl) { prevEl.textContent = ''; prevEl.className = 'zone-preview empty'; }
+        if (inp) {
+            inp.value = text;
+            inp.dispatchEvent(new Event('input'));
+            inp.focus();
+        }
+        if (btn) btn.textContent = text ? '✅ Zona marcada — Redibujar' : '✏️ Marcar zona en el PDF';
 
-    const text = await ocrZoneManual(rect);
-
-    if (runEl)  runEl.classList.remove('visible');
-    if (cardEl) cardEl.classList.add('filled');
-    if (statId) document.getElementById(statId).textContent = '✅';
-    if (prevEl) {
-        prevEl.className  = 'zone-preview' + (text ? '' : ' empty');
-        prevEl.textContent = text || '(sin texto — amplía la zona)';
+        // Guardar la zona dibujada para que el ML aprenda la posición correcta
+        correctedRects[corrPart.id] = rect;
+        return;
     }
 
-    if (which === 'id')   tplIdZone   = { rect, text };
-    else                   tplPartZone = { rect, text };
+    if (which === 'id') {
+        const runEl  = document.getElementById('tpl-ocr-id-running');
+        const prevEl = document.getElementById('tpl-id-preview');
+        const cardEl = document.getElementById('tpl-id-zone-card');
+        if (runEl)  runEl.classList.add('visible');
+        const text = await ocrZoneManual(rect);
+        if (runEl)  runEl.classList.remove('visible');
+        if (cardEl) cardEl.classList.add('filled');
+        const statEl = document.getElementById('tpl-id-status');
+        if (statEl) statEl.textContent = '✅';
+        if (prevEl) {
+            prevEl.className  = 'zone-preview' + (text ? '' : ' empty');
+            prevEl.textContent = text || '(sin texto — amplía la zona)';
+        }
+        tplIdZone = { rect, text };
+        renderOverlay();
+        updateSaveBtn();
+        return;
+    }
 
-    renderOverlay();
-    updateSaveBtn();
+    // Parte OCR
+    if (which === 'ocr-part' && pid) {
+        const part = tplParts.find(p => p.id === pid);
+        if (part) {
+            part.rect     = rect;
+            part._preview = '';
+            part._loading = true;
+            renderTplParts();
+            renderOverlay();
+
+            const text = await ocrZoneManual(rect);
+            const p2 = tplParts.find(p => p.id === pid);
+            if (p2) { p2._preview = text; p2._loading = false; }
+            renderTplParts();
+            updateTplPreview();
+        }
+        updateSaveBtn();
+    }
 }
 
-async function ocrZoneManual(rect) {
+// Worker numérico reutilizable (solo dígitos) — más fiable para números
+let _numWorker = null, _numWorkerPromise = null;
+async function getNumWorker() {
+    if (_numWorker) return _numWorker;
+    if (_numWorkerPromise) return _numWorkerPromise;
+    _numWorkerPromise = (async () => {
+        const w = await Tesseract.createWorker('eng');
+        await w.setParameters({ tessedit_char_whitelist: '0123456789-/.', tessedit_pageseg_mode: '7' });
+        _numWorker = w; return w;
+    })();
+    return _numWorkerPromise;
+}
+
+async function ocrZoneManual(rect, opts = {}) {
     if (!pdfDoc) return '';
     try {
         const page = await pdfDoc.getPage(1);
         const vp   = page.getViewport({ scale: 3.0 });
-        const full = document.createElement('canvas');
+        let full = document.createElement('canvas');
         full.width = vp.width; full.height = vp.height;
         await page.render({ canvasContext: full.getContext('2d'), viewport: vp }).promise;
+        if (pdfSkewAngle) full = deskewCanvas(full, pdfSkewAngle);  // enderezar igual que la vista
 
         const zx = rect.x * vp.width, zy = rect.y * vp.height;
         const zw = rect.w * vp.width, zh = rect.h * vp.height;
-        const crop = document.createElement('canvas');
-        crop.width  = Math.max(1, Math.round(zw));
-        crop.height = Math.max(1, Math.round(zh));
-        crop.getContext('2d').drawImage(full, zx, zy, zw, zh, 0, 0, zw, zh);
 
-        const { data } = await Tesseract.recognize(crop.toDataURL('image/png'), 'spa');
-        return data.text.replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim();
+        // Preprocesado: upscale ×2 + gris + umbral
+        const cw = Math.max(1, Math.round(zw * 2)), ch = Math.max(1, Math.round(zh * 2));
+        const crop = document.createElement('canvas');
+        crop.width = cw; crop.height = ch;
+        const cx = crop.getContext('2d');
+        cx.imageSmoothingEnabled = true; cx.imageSmoothingQuality = 'high';
+        cx.drawImage(full, zx, zy, zw, zh, 0, 0, cw, ch);
+        try {
+            const im = cx.getImageData(0, 0, cw, ch), d = im.data;
+            for (let i = 0; i < d.length; i += 4) {
+                const g = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
+                const v = g > 145 ? 255 : 0; d[i]=d[i+1]=d[i+2]=v;
+            }
+            cx.putImageData(im, 0, 0);
+        } catch (_) {}
+
+        const url = crop.toDataURL('image/png');
+        if (opts.numeric) {
+            try {
+                const w = await getNumWorker();
+                const { data } = await w.recognize(url);
+                const t = (data.text || '').replace(/\s+/g, ' ').trim();
+                if (t) return t;
+            } catch (_) {}
+        }
+        const { data } = await Tesseract.recognize(url, 'spa');
+        return (data.text || '').replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim();
     } catch { return ''; }
+}
+
+/** ¿Una parte busca un valor numérico? */
+function partIsNumeric(part) {
+    if (!part) return false;
+    if (part.transform === 'numbers_only' || part.transform === 'strip_zeros') return true;
+    const lbl = (part.label || '').toLowerCase();
+    return /n[uú]m|numero|pedido|albar|factura|ref|c[oó]digo|importe|nif|cif/.test(lbl);
 }
 
 // ── Modo creación de plantilla ────────────────────────────────────────────────
@@ -925,8 +1390,8 @@ async function ocrZoneManual(rect) {
 function enterTemplateMode() {
     tplMode     = true;
     tplIdZone   = null;
-    tplPartZone = null;
-    tplNewTypeFolder = '';
+    tplParts    = [];
+    tplPendingPartId = null;
 
     const panel = document.getElementById('right-panel');
     panel.innerHTML = '';
@@ -995,28 +1460,25 @@ function enterTemplateMode() {
     `;
     panel.appendChild(idCard);
 
-    // Zona del dato a extraer
-    const partCard = document.createElement('div');
-    partCard.className = 'zone-card part-zone';
-    partCard.id = 'tpl-part-zone-card';
-    partCard.innerHTML = `
-        <div class="zone-header">
-            <span class="zone-dot part-dot"></span>
-            Dato a extraer para el nombre
-            <span class="zone-status" id="tpl-part-status">⬜</span>
+    // Constructor del formato de nombre (igual que el Motor OCR Zonal)
+    const fmtCard = document.createElement('div');
+    fmtCard.className = 'card';
+    fmtCard.innerHTML = `
+        <div class="field-label">Formato del nombre del archivo</div>
+        <div class="tpl-parts-builder" id="tpl-parts-list">
+            <div class="tpl-parts-empty">Añade partes para componer el nombre</div>
         </div>
-        <div class="zone-preview empty" id="tpl-part-preview">
-            Dibuja la zona con el número de pedido, referencia, fecha…
+        <div class="tpl-parts-add">
+            <button class="tpl-btn-add tpl-add-text"   id="tpl-btn-add-text">+ Texto fijo</button>
+            <button class="tpl-btn-add tpl-add-ocr"    id="tpl-btn-add-ocr">+ Zona OCR</button>
+            <button class="tpl-btn-add tpl-add-search" id="tpl-btn-add-search">+ Búsqueda</button>
         </div>
-        <div class="zone-preview empty" id="tpl-part-label-row" style="margin-top:4px;display:none">
-            <input type="text" id="tpl-part-label" placeholder="Etiqueta (ej: Número pedido, Fecha…)" style="font-size:.8rem;padding:5px 8px">
+        <div class="tpl-preview-box" id="tpl-preview-box" style="display:none">
+            <span class="tpl-preview-label">Vista previa del nombre:</span>
+            <span class="tpl-preview-value empty" id="tpl-preview-value">—</span>
         </div>
-        <div class="ocr-running" id="tpl-ocr-part-running">
-            <div class="ocr-spin"></div> Analizando zona…
-        </div>
-        <button class="btn-draw part-draw" id="btn-draw-part">📝 Dibujar zona del dato</button>
     `;
-    panel.appendChild(partCard);
+    panel.appendChild(fmtCard);
 
     // Botón guardar
     const saveBtn = document.createElement('button');
@@ -1028,15 +1490,16 @@ function enterTemplateMode() {
 
     // ── Event listeners ───────────────────────────────────────────────────────
     document.getElementById('btn-back-rename').addEventListener('click', exitTemplateMode);
+    document.getElementById('btn-draw-id').addEventListener('click', startDrawingId);
 
-    document.getElementById('btn-draw-id').addEventListener('click', () => startDrawing('id'));
-    document.getElementById('btn-draw-part').addEventListener('click', () => {
-        startDrawing('part');
-        document.getElementById('tpl-part-label-row').style.display = 'block';
-    });
+    document.getElementById('tpl-btn-add-text').addEventListener('click', addTplTextPart);
+    document.getElementById('tpl-btn-add-ocr').addEventListener('click', addTplOcrPart);
+    document.getElementById('tpl-btn-add-search').addEventListener('click', addTplSearchPart);
 
     document.getElementById('tpl-name').addEventListener('input', updateSaveBtn);
     document.getElementById('btn-save-tpl').addEventListener('click', saveTemplateAndContinue);
+
+    renderTplParts();
 
     // Selector de tipo: cargar existentes
     loadTypesForSelector();
@@ -1055,6 +1518,164 @@ function enterTemplateMode() {
 
     document.getElementById('tpl-new-type-name')?.addEventListener('input', updateSaveBtn);
     document.getElementById('tpl-new-type-folder')?.addEventListener('input', updateSaveBtn);
+}
+
+// ── Constructor de partes del nombre (igual que Motor OCR Zonal) ───────────────
+function addTplTextPart() {
+    tplParts.push({ id: genTplPartId(), type: 'text', value: '' });
+    renderTplParts();
+    updateSaveBtn();
+}
+
+function addTplOcrPart() {
+    if (!pdfDoc) { alert('No hay PDF cargado.'); return; }
+    const part = { id: genTplPartId(), type: 'ocr', label: '', transform: 'none', rect: null, _preview: '', _loading: false };
+    tplParts.push(part);
+    renderTplParts();
+    startDrawingPart(part.id);
+    updateSaveBtn();
+}
+
+function addTplSearchPart() {
+    tplParts.push({ id: genTplPartId(), type: 'text-search', label: '', before: '', after: '', transform: 'none' });
+    renderTplParts();
+    updateSaveBtn();
+}
+
+function tplEsc(s) {
+    return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function renderTplParts() {
+    const container = document.getElementById('tpl-parts-list');
+    if (!container) return;
+    if (!tplParts.length) {
+        container.innerHTML = '<div class="tpl-parts-empty">Añade partes para componer el nombre</div>';
+        updateTplPreview();
+        return;
+    }
+
+    container.innerHTML = '';
+    let ocrIdx = 0;
+
+    tplParts.forEach(part => {
+        const card = document.createElement('div');
+        const drawingThis = (part.id === tplPendingPartId);
+
+        if (part.type === 'text') {
+            card.className = 'tpl-part-card text';
+            card.innerHTML = `
+                <div class="tpl-part-head">
+                    <span class="tpl-part-badge badge-text">📝 Texto fijo</span>
+                    <button class="tpl-part-del" data-id="${part.id}">✕</button>
+                </div>
+                <input type="text" class="tpl-part-input" placeholder="Texto estático (ej: FACTURA , - , / …)" value="${tplEsc(part.value||'')}">
+            `;
+            card.querySelector('.tpl-part-input').addEventListener('input', e => {
+                const p = tplParts.find(x => x.id === part.id);
+                if (p) { p.value = e.target.value; updateTplPreview(); }
+            });
+
+        } else if (part.type === 'text-search') {
+            card.className = 'tpl-part-card search';
+            card.innerHTML = `
+                <div class="tpl-part-head">
+                    <span class="tpl-part-badge badge-search">🔎 Búsqueda de texto</span>
+                    <button class="tpl-part-del" data-id="${part.id}">✕</button>
+                </div>
+                <input type="text" class="tpl-part-input part-label" placeholder="Etiqueta (ej: Número pedido…)" value="${tplEsc(part.label||'')}">
+                <div class="tpl-search-hint">💡 Busca el texto que aparece tras una palabra clave en cualquier parte del documento.</div>
+                <input type="text" class="tpl-part-input part-before" placeholder="Texto ANTES del dato (ej: PEDIDO NÚM:)" value="${tplEsc(part.before||'')}">
+                <input type="text" class="tpl-part-input part-after" placeholder="Texto DESPUÉS (opcional)" value="${tplEsc(part.after||'')}">
+                ${tplTransformSelect(part)}
+            `;
+            card.querySelector('.part-label').addEventListener('input', e => { const p=tplParts.find(x=>x.id===part.id); if(p) p.label=e.target.value; });
+            card.querySelector('.part-before').addEventListener('input', e => { const p=tplParts.find(x=>x.id===part.id); if(p){p.before=e.target.value; updateTplPreview();} updateSaveBtn(); });
+            card.querySelector('.part-after').addEventListener('input', e => { const p=tplParts.find(x=>x.id===part.id); if(p) p.after=e.target.value; });
+            card.querySelector('.tpl-transform')?.addEventListener('change', e => { const p=tplParts.find(x=>x.id===part.id); if(p){p.transform=e.target.value; updateTplPreview();} });
+
+        } else {
+            // OCR
+            ocrIdx++;
+            const myIdx   = ocrIdx;
+            const hasZone = part.rect != null;
+            card.className = 'tpl-part-card ocr' + (drawingThis ? ' drawing' : '');
+            card.innerHTML = `
+                <div class="tpl-part-head">
+                    <span class="tpl-part-badge badge-ocr">🔍 Zona OCR ${myIdx}</span>
+                    <button class="tpl-part-del" data-id="${part.id}">✕</button>
+                </div>
+                <input type="text" class="tpl-part-input part-label" placeholder="Etiqueta (ej: Número pedido, Fecha…)" value="${tplEsc(part.label||'')}">
+                ${drawingThis
+                    ? `<div class="tpl-draw-now">⏳ Dibuja la zona en el PDF…</div>`
+                    : `<button class="tpl-btn-draw-zone" data-id="${part.id}">${hasZone ? '↺ Redibujar zona' : '✏️ Dibujar zona en el PDF'}</button>`}
+                ${hasZone && !drawingThis ? `
+                    <div class="tpl-part-ocr ${part._preview ? '' : 'empty'}">
+                        ${part._loading ? '⏳ Analizando…' : (part._preview ? '"'+tplEsc(part._preview)+'"' : '(sin texto — amplía la zona)')}
+                    </div>
+                    ${tplTransformSelect(part)}` : ''}
+            `;
+            card.querySelector('.part-label').addEventListener('input', e => { const p=tplParts.find(x=>x.id===part.id); if(p) p.label=e.target.value; renderOverlay(); });
+            card.querySelector('.tpl-btn-draw-zone')?.addEventListener('click', () => startDrawingPart(part.id));
+            card.querySelector('.tpl-transform')?.addEventListener('change', e => { const p=tplParts.find(x=>x.id===part.id); if(p){p.transform=e.target.value; updateTplPreview();} });
+        }
+
+        card.querySelector('.tpl-part-del').addEventListener('click', () => {
+            if (tplPendingPartId === part.id) cancelDrawing();
+            tplParts = tplParts.filter(x => x.id !== part.id);
+            renderTplParts();
+            renderOverlay();
+            updateSaveBtn();
+        });
+
+        container.appendChild(card);
+    });
+
+    updateTplPreview();
+}
+
+function tplTransformSelect(part) {
+    const t = part.transform || 'none';
+    const opt = (v, lbl) => `<option value="${v}"${t===v?' selected':''}>${lbl}</option>`;
+    return `
+        <div class="tpl-transform-row">
+            <span class="tpl-transform-lbl">Transformar:</span>
+            <select class="tpl-transform">
+                ${opt('none','Sin cambios')}
+                ${opt('strip_zeros','Quitar ceros iniciales')}
+                ${opt('upper','MAYÚSCULAS')}
+                ${opt('lower','minúsculas')}
+                ${opt('replace_slash','/ → -')}
+                ${opt('numbers_only','Solo números')}
+            </select>
+        </div>`;
+}
+
+function tplApplyTransform(text, transform) {
+    switch (transform) {
+        case 'strip_zeros':   return text.replace(/\b0+(\d)/g, '$1');
+        case 'upper':         return text.toUpperCase();
+        case 'lower':         return text.toLowerCase();
+        case 'replace_slash': return text.replace(/\//g, '-');
+        case 'numbers_only':  return text.replace(/[^\d]/g, '');
+        default:              return text;
+    }
+}
+
+function updateTplPreview() {
+    const box = document.getElementById('tpl-preview-box');
+    const val = document.getElementById('tpl-preview-value');
+    if (!box || !val) return;
+    if (!tplParts.length) { box.style.display = 'none'; return; }
+    box.style.display = 'block';
+    const preview = tplParts.map(p => {
+        if (p.type === 'text') return p.value || '';
+        if (p.type === 'text-search') return p.before ? `[${p.label || 'búsqueda'}]` : '';
+        const raw = p._preview || (p.rect ? '?' : '');
+        return tplApplyTransform(raw, p.transform || 'none');
+    }).join('').trim();
+    val.textContent = preview ? `${preview}.pdf` : '—';
+    val.className   = 'tpl-preview-value' + (preview ? '' : ' empty');
 }
 
 async function loadTypesForSelector() {
@@ -1101,14 +1722,20 @@ function updateSaveBtn() {
     const btn = document.getElementById('btn-save-tpl');
     if (!btn) return;
     const name      = (document.getElementById('tpl-name')?.value || '').trim();
-    const hasPart   = !!tplPartZone?.rect;
+    const hasParts  = tplParts.length > 0;
+    const partsOk   = tplParts.every(p => {
+        if (p.type === 'text')        return true;
+        if (p.type === 'ocr')         return p.rect != null;
+        if (p.type === 'text-search') return (p.before || '').trim().length > 0;
+        return true;
+    });
     const typeSel   = document.getElementById('tpl-type-sel')?.value;
     const newName   = (document.getElementById('tpl-new-type-name')?.value || '').trim();
     const newFolder = (document.getElementById('tpl-new-type-folder')?.value || '').trim();
     // Tipo existente → OK. Tipo nuevo → requiere nombre Y carpeta destino.
     const typeOk    = (typeSel && typeSel !== '__new__')
                     || (typeSel === '__new__' && newName.length > 0 && newFolder.length > 0);
-    btn.disabled    = !(name && hasPart && typeOk);
+    btn.disabled    = !(name && hasParts && partsOk && typeOk);
 }
 
 async function saveTemplateAndContinue() {
@@ -1118,26 +1745,24 @@ async function saveTemplateAndContinue() {
     try {
         const name     = document.getElementById('tpl-name').value.trim();
         const typeSel  = document.getElementById('tpl-type-sel').value;
-        const partLabel = (document.getElementById('tpl-part-label')?.value || '').trim() || 'Identificador';
 
-        // 1. Guardar la plantilla OCR
-        const renameParts = [];
-        if (tplPartZone?.rect) {
-            renameParts.push({
-                id:        'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
-                type:      'ocr',
-                page:      0,
-                rect:      tplPartZone.rect,
-                label:     partLabel,
-                transform: 'none',
-            });
-        }
+        // 1. Construir las partes y guardar la plantilla OCR
+        const firstOcrRect = tplParts.find(p => p.type === 'ocr' && p.rect)?.rect;
+        const renameParts = tplParts.map(p => {
+            if (p.type === 'text') return { id: p.id, type: 'text', value: p.value || '' };
+            if (p.type === 'text-search') return {
+                id: p.id, type: 'text-search',
+                label: p.label || '', before: p.before || '', after: p.after || '',
+                transform: p.transform || 'none',
+            };
+            return { id: p.id, type: 'ocr', page: 0, rect: p.rect, label: p.label || '', transform: p.transform || 'none' };
+        });
 
         const tplResult = await window.manualRenameAPI.saveOcrTemplate({
             nombre:         name,
             identification: tplIdZone
                 ? { page: 0, rect: tplIdZone.rect, text: tplIdZone.text || '' }
-                : { page: 0, rect: tplPartZone.rect, text: '' }, // fallback: usa la zona del dato
+                : { page: 0, rect: firstOcrRect || { x: 0, y: 0, w: 0.3, h: 0.05 }, text: '' },
             renameParts,
         });
 
@@ -1172,8 +1797,11 @@ async function saveTemplateAndContinue() {
             });
         }
 
-        // Capturar el valor que el OCR ya extrajo, para pre-rellenar el formulario
-        const prefillValue = (tplPartZone?.text || '').trim();
+        // Capturar los valores que el OCR ya extrajo (por id de parte) para pre-rellenar
+        const prefillById = {};
+        tplParts.forEach(p => {
+            if (p.type === 'ocr' && (p._preview || '').trim()) prefillById[p.id] = p._preview.trim();
+        });
 
         // 3. Actualizar estado local y volver al formulario de renombrado
         const updatedTypes = await window.manualRenameAPI.getDocTypes() || [];
@@ -1187,15 +1815,14 @@ async function saveTemplateAndContinue() {
         // 4. Re-construir el selector de tipo y pre-seleccionar el tipo recién creado
         buildTypeSelector(typeId);
 
-        // 5. Pre-rellenar el campo OCR con el valor ya detectado durante la creación
-        if (prefillValue && activeTpl?.renameParts) {
-            const ocrPart = activeTpl.renameParts.find(p => p.type === 'ocr');
-            if (ocrPart) {
-                const inp = document.getElementById(`inp-part-${ocrPart.id}`);
-                if (inp) {
-                    inp.value = prefillValue;
-                    inp.dispatchEvent(new Event('input'));
-                }
+        // 5. Pre-rellenar cada campo OCR con el valor ya detectado durante la creación
+        if (activeTpl?.renameParts) {
+            for (const part of activeTpl.renameParts) {
+                if (part.type !== 'ocr') continue;
+                const val = prefillById[part.id];
+                if (!val) continue;
+                const inp = document.getElementById(`inp-part-${part.id}`);
+                if (inp) { inp.value = val; inp.dispatchEvent(new Event('input')); }
             }
         }
 
@@ -1222,7 +1849,8 @@ async function saveTemplateAndContinue() {
 function exitTemplateMode() {
     tplMode     = false;
     tplIdZone   = null;
-    tplPartZone = null;
+    tplParts    = [];
+    tplPendingPartId = null;
     cancelDrawing();
     renderOverlay();
 

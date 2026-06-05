@@ -159,6 +159,13 @@
         .part-input-row { display: flex; flex-direction: column; gap: 3px; }
         .part-input-row label { font-size: .8rem; font-weight: 600; color: #555; }
         body.dark-mode .part-input-row label { color: #bbb; }
+        .btn-correct-zone {
+            margin-top: 2px; padding: 5px 8px; border-radius: 6px;
+            border: 1.5px dashed #10b981; background: #f0fdf4; color: #065f46;
+            font-size: .76rem; font-weight: 600; cursor: pointer; transition: all .15s;
+        }
+        .btn-correct-zone:hover { background: #dcfce7; }
+        body.dark-mode .btn-correct-zone { background: #064e3b; color: #6ee7b7; border-color: #10b981; }
 
         /* ── Nombre simple (sin template) ── */
         .simple-hint { font-size: .78rem; color: #888; margin-top: 5px; }
@@ -312,6 +319,97 @@
             border-top-color: #4338ca; border-radius: 50%;
             animation: spin .7s linear infinite;
         }
+
+        /* ── Constructor de partes (igual que Motor OCR Zonal) ── */
+        .tpl-parts-builder { display: flex; flex-direction: column; gap: 6px; }
+        .tpl-parts-empty { font-size: .77rem; color: #bbb; text-align: center; padding: 8px 0; }
+        .tpl-parts-add { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+        .tpl-btn-add {
+            flex: 1; min-width: 80px; padding: 6px 8px; border-radius: 7px;
+            border: 1.5px dashed #d0d0d0; background: transparent;
+            font-size: .76rem; font-weight: 600; cursor: pointer; transition: all .15s;
+        }
+        .tpl-add-text   { color: #555; }
+        .tpl-add-text:hover   { border-color: #555; background: #f5f5f5; }
+        .tpl-add-ocr    { color: #065f46; }
+        .tpl-add-ocr:hover    { border-color: #10b981; background: #ecfdf5; }
+        .tpl-add-search { color: #4338ca; }
+        .tpl-add-search:hover { border-color: #6366f1; background: #eef2ff; }
+        body.dark-mode .tpl-btn-add { border-color: #444; color: #aaa; }
+
+        .tpl-part-card {
+            border-radius: 8px; border: 1.5px solid #e5e7eb; padding: 8px 10px;
+            background: #fff; display: flex; flex-direction: column; gap: 6px;
+        }
+        body.dark-mode .tpl-part-card { background: #1e1e1e; border-color: #333; }
+        .tpl-part-card.text   { border-left: 3px solid #94a3b8; }
+        .tpl-part-card.ocr    { border-left: 3px solid #10b981; }
+        .tpl-part-card.search { border-left: 3px solid #6366f1; }
+        .tpl-part-card.ocr.drawing { border-left-color: #f59e0b; border-color: #f59e0b; background: #fffbeb; }
+        body.dark-mode .tpl-part-card.ocr.drawing { background: #2a2000; }
+
+        .tpl-part-head { display: flex; align-items: center; gap: 6px; }
+        .tpl-part-badge { font-size: .71rem; font-weight: 700; padding: 2px 7px; border-radius: 10px; }
+        .badge-text   { background: #f1f5f9; color: #475569; }
+        .badge-ocr    { background: #d1fae5; color: #065f46; }
+        .badge-search { background: #e0e7ff; color: #3730a3; }
+        body.dark-mode .badge-text   { background: #2a2a2a; color: #94a3b8; }
+        body.dark-mode .badge-ocr    { background: #064e3b; color: #6ee7b7; }
+        body.dark-mode .badge-search { background: #1e1b4b; color: #a5b4fc; }
+        .tpl-part-del {
+            margin-left: auto; width: 22px; height: 22px; border-radius: 5px;
+            border: 1px solid #e0e0e0; background: transparent; cursor: pointer;
+            color: #dc2626; font-size: .73rem; display: flex; align-items: center; justify-content: center;
+        }
+        .tpl-part-del:hover { background: #fee2e2; border-color: #dc2626; }
+        body.dark-mode .tpl-part-del { border-color: #444; }
+
+        .tpl-part-input {
+            width: 100%; padding: 6px 9px; border: 1.5px solid #d5d5d5; border-radius: 7px;
+            font-size: .82rem; background: #fff; color: #2c3e50; font-family: inherit;
+        }
+        .tpl-part-input:focus { outline: none; border-color: #3b82f6; }
+        body.dark-mode .tpl-part-input { background: #1a1a1a; border-color: #444; color: #e0e0e0; }
+
+        .tpl-btn-draw-zone {
+            width: 100%; padding: 6px 8px; border-radius: 6px; border: 1.5px dashed #10b981;
+            background: #f0fdf4; color: #065f46; font-size: .78rem; font-weight: 600; cursor: pointer;
+        }
+        .tpl-btn-draw-zone:hover { background: #dcfce7; }
+        body.dark-mode .tpl-btn-draw-zone { background: #064e3b; color: #6ee7b7; }
+        .tpl-draw-now { font-size: .77rem; color: #b45309; font-weight: 600; padding: 4px 2px; }
+        body.dark-mode .tpl-draw-now { color: #fcd34d; }
+
+        .tpl-part-ocr {
+            font-size: .75rem; color: #555; background: rgba(0,0,0,.04);
+            padding: 4px 7px; border-radius: 5px; font-style: italic; word-break: break-word;
+        }
+        .tpl-part-ocr.empty { color: #aaa; font-style: normal; }
+        body.dark-mode .tpl-part-ocr { color: #bbb; background: rgba(255,255,255,.06); }
+
+        .tpl-search-hint {
+            font-size: .71rem; color: #6366f1; background: #eef2ff;
+            padding: 5px 8px; border-radius: 6px; line-height: 1.4;
+        }
+        body.dark-mode .tpl-search-hint { background: #1e1b4b; color: #a5b4fc; }
+
+        .tpl-transform-row { display: flex; align-items: center; gap: 6px; }
+        .tpl-transform-lbl { font-size: .72rem; color: #888; white-space: nowrap; }
+        .tpl-transform {
+            flex: 1; padding: 4px 6px; border: 1.5px solid #d5d5d5; border-radius: 6px;
+            font-size: .74rem; background: #fff; color: #2c3e50;
+        }
+        body.dark-mode .tpl-transform { background: #1a1a1a; border-color: #444; color: #e0e0e0; }
+
+        .tpl-preview-box {
+            background: #f8fafc; border: 1.5px solid #e2e8f0; border-radius: 7px;
+            padding: 8px 10px; margin-top: 6px;
+        }
+        body.dark-mode .tpl-preview-box { background: #1a1a1a; border-color: #333; }
+        .tpl-preview-label { font-size: .72rem; color: #888; display: block; margin-bottom: 3px; }
+        .tpl-preview-value { font-size: .82rem; font-weight: 600; color: #2c3e50; word-break: break-all; }
+        .tpl-preview-value.empty { color: #bbb; font-weight: 400; font-style: italic; }
+        body.dark-mode .tpl-preview-value { color: #e0e0e0; }
     </style>
 </head>
 <body>

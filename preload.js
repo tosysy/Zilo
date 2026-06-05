@@ -22,16 +22,24 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('load-ocr-index'),
   addOcrDocument: (data) =>
     ipcRenderer.invoke('add-ocr-document', data),
+  getRecentDocuments: (limit) =>
+    ipcRenderer.invoke('get-recent-documents', limit),
+  removeOcrDocument: (filePath) =>
+    ipcRenderer.invoke('remove-ocr-document', filePath),
   saveOCRIndex: (indexData) =>
     ipcRenderer.invoke('save-ocr-index', indexData),
   getFilePath: (file) => getFilePath(file),
   openSearchWindow: () => ipcRenderer.invoke('open-search-window'),
   openSettingsWindow: () => ipcRenderer.invoke('open-settings-window'),
   openManualRenameWindow: (fileData) => ipcRenderer.invoke('open-manual-rename-window', fileData),
+  closeManualRenameWindow: () => ipcRenderer.invoke('close-manual-rename-window'),
   onManualRenameConfirmed: (callback) =>
     ipcRenderer.on('manual-rename-confirmed', (_event, data) => callback(data)),
   onManualRenameSkipped: (callback) =>
     ipcRenderer.on('manual-rename-skipped', () => callback()),
+  onManualTemplateCreated: (callback) =>
+    ipcRenderer.on('manual-template-created', (_event, data) => callback(data)),
+  logToCmd: (msg) => ipcRenderer.send('log-to-cmd', msg),
   onWatchedFileDetected: (callback) =>
     ipcRenderer.on('watched-file-detected', (_event, fileData) => callback(fileData)),
   getLicenseStatus:    ()           => ipcRenderer.invoke('license-get-status'),
@@ -39,6 +47,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openOcrZonalWindow:         ()     => ipcRenderer.invoke('open-ocr-zonal-window'),
   getOcrTemplates:            ()     => ipcRenderer.invoke('ocr-zonal-get-templates'),
   incrementOcrConfirmations:  (id)   => ipcRenderer.invoke('ocr-increment-confirmations', id),
+  addTemplateCif:             (data) => ipcRenderer.invoke('ocr-add-template-cif', data),
   addPendingPattern:          (data) => ipcRenderer.invoke('ocr-add-pending-pattern', data),
   // Aprendizaje adaptativo de posiciones OCR
   recordPartPosition: (data) => ipcRenderer.invoke('position-record',       data),

@@ -15,6 +15,7 @@ let ziloDb           = null;
 let licenseWindow    = null;
 let adminPanelWindow = null;
 let ocrZonalWindow   = null;
+let ocrZonalFinalizing = false;   // true cuando se cierra por "procesar documento" desde renombrado manual
 let docTypesWindow   = null;
 
 let mainWindow;
@@ -164,18 +165,26 @@ function openAdminPanel() {
 }
 
 // ─── Ventana OCR Zonal ────────────────────────────────────────────────────────
-function openOcrZonalWindow() {
+function openOcrZonalWindow(opts = {}) {
+  const { pdfPath = null, origin = null } = opts;
   return new Promise((resolve) => {
     if (ocrZonalWindow && !ocrZonalWindow.isDestroyed()) {
-      ocrZonalWindow.focus(); return resolve({ success: true });
+      ocrZonalWindow.focus();
+      // Si ya está abierta y nos piden cargar un PDF, enviarlo igualmente
+      if (pdfPath) ocrZonalWindow.webContents.send('preload-pdf', { pdfPath });
+      return resolve({ success: true });
     }
     const { width, height } = screen.getPrimaryDisplay().workAreaSize;
     const x = Math.round((width  / 2) - (1200 / 2));
     const y = Math.round((height / 2) - (760 / 2));
 
+    // Si se abre desde el renombrado manual, parentar a esa ventana (no modal al main)
+    const parentWin = (origin === 'manual-rename' && manualRenameWindow && !manualRenameWindow.isDestroyed())
+      ? manualRenameWindow : mainWindow;
+
     ocrZonalWindow = new BrowserWindow({
       width: 1200, height: 760, x, y,
-      parent: mainWindow, modal: true,
+      parent: parentWin, modal: true,
       resizable: true, maximizable: true, fullscreenable: true,
       webPreferences: {
         preload: path.join(__dirname, 'ocr-zonal-preload.js'),
@@ -190,7 +199,26 @@ function openOcrZonalWindow() {
       if (ocrZonalWindow && !ocrZonalWindow.isDestroyed())
         ocrZonalWindow.webContents.send('theme-changed', theme || 'light');
     });
-    ocrZonalWindow.on('closed', () => { ocrZonalWindow = null; resolve({ success: true }); });
+
+    // Cuando termine de cargar, si nos dieron un PDF, enviarlo para auto-cargarlo
+    if (pdfPath) {
+      ocrZonalWindow.webContents.once('did-finish-load', () => {
+        if (ocrZonalWindow && !ocrZonalWindow.isDestroyed())
+          ocrZonalWindow.webContents.send('preload-pdf', { pdfPath });
+      });
+    }
+
+    ocrZonalWindow.on('closed', () => {
+      ocrZonalWindow = null;
+      // Si se cerró por "procesar documento", app.js ya gestiona el archivo y la cola
+      if (ocrZonalFinalizing) {
+        ocrZonalFinalizing = false;
+      } else if (origin === 'manual-rename' && manualRenameWindow && !manualRenameWindow.isDestroyed()) {
+        // Cierre normal: avisar al renombrado para recargar tipos/plantillas
+        manualRenameWindow.webContents.send('ocr-zonal-closed');
+      }
+      resolve({ success: true });
+    });
   });
 }
 
@@ -686,11 +714,29 @@ ipcMain.handle('load-ocr-index', async () => {
 });
 
 // Añadir un documento al índice OCR (SQLite)
-ipcMain.handle('add-ocr-document', async (event, { filePath, fileName, ocrText, docType }) => {
+ipcMain.handle('add-ocr-document', async (event, { filePath, fileName, ocrText, docType, templateId, originalName, mode }) => {
   try {
-    return ziloDb.addOcrDocument(filePath, fileName, ocrText || '', docType || '');
+    return ziloDb.addOcrDocument(filePath, fileName, ocrText || '', docType || '', templateId || null, originalName || null, mode || null);
   } catch (error) {
     console.error('[ERROR] Error al indexar documento:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Historial: últimos N documentos procesados
+ipcMain.handle('get-recent-documents', async (event, limit) => {
+  try {
+    return ziloDb.getRecentDocuments(limit || 15);
+  } catch (error) {
+    return { success: false, error: error.message, results: [] };
+  }
+});
+
+// Eliminar una entrada del índice por ruta (al re-renombrar en una corrección)
+ipcMain.handle('remove-ocr-document', async (event, filePath) => {
+  try {
+    return ziloDb.removeOcrDocument(filePath);
+  } catch (error) {
     return { success: false, error: error.message };
   }
 });
@@ -1100,6 +1146,20 @@ ipcMain.on('manual-rename-confirmed', (event, data) => {
   }
 });
 
+// Puente para que el proceso de la app (renderer) escriba mensajes en el CMD
+ipcMain.on('log-to-cmd', (event, msg) => {
+  console.log(msg);
+});
+
+// Cerrar la ventana de renombrado manual desde la app principal (cola vacía)
+ipcMain.handle('close-manual-rename-window', () => {
+  if (manualRenameWindow && !manualRenameWindow.isDestroyed()) {
+    manualRenameWindow.forceClose = true;
+    manualRenameWindow.close();
+  }
+  return { success: true };
+});
+
 // Recibir omisión de archivo desde la ventana de renombrado manual
 ipcMain.on('manual-rename-skipped', (event) => {
   console.log('[SKIPPED] Archivo omitido por el usuario');
@@ -1174,6 +1234,10 @@ ipcMain.handle('ocr-increment-confirmations', async (event, id) => {
   return ocrZonalEngine.incrementConfirmations(id);
 });
 
+ipcMain.handle('ocr-add-template-cif', async (event, { templateId, cif }) => {
+  return ziloDb.addTemplateCif(templateId, cif);
+});
+
 ipcMain.handle('ocr-get-pending-patterns', async () => {
   return ocrZonalEngine.getPendingPatterns();
 });
@@ -1206,11 +1270,58 @@ ipcMain.handle('position-get-stats', (event, templateId) => {
 // ── Motor ML ──────────────────────────────────────────────────────────────────
 ipcMain.handle('ml-train', async (event, { text, className }) => {
   // Normalizar nombre del tipo a mayúsculas para que _isExpertForType lo encuentre siempre
-  return mlEngine.train(text, (className || '').trim().toUpperCase());
+  const type = (className || '').trim().toUpperCase();
+  const result = await mlEngine.train(text, type);
+
+  // ── Explicación legible del aprendizaje en el CMD ──────────────────────────
+  try {
+    if (result?.success) {
+      const stats     = mlEngine.getStats();
+      const cls       = stats.classes?.[type] || {};
+      const ejemplos  = cls.docCount || result.classCount || 0;
+      const totalDocs = stats.totalDocs || 0;
+      const numTipos  = stats.classCount || Object.keys(stats.classes || {}).length;
+      const faltan    = Math.max(0, 20 - ejemplos);
+
+      console.log('');
+      console.log('╔══════════════════════════════════════════════════════════════════╗');
+      console.log(`║  🧠 ZILO HA APRENDIDO DE UN DOCUMENTO NUEVO`);
+      console.log('╠══════════════════════════════════════════════════════════════════╣');
+      console.log(`║  Tipo estudiado : ${type}`);
+      console.log(`║  Ejemplos vistos: ${ejemplos} de este tipo de documento`);
+      if (faltan > 0) {
+        console.log(`║  Progreso       : le faltan ${faltan} ejemplos para dominarlo y`);
+        console.log(`║                   renombrarlo solo, sin preguntarte.`);
+      } else {
+        console.log(`║  Progreso       : ⭐ YA DOMINA este tipo (renombra automáticamente).`);
+      }
+      console.log(`║  En total       : ha estudiado ${totalDocs} documentos de ${numTipos} tipo(s).`);
+      console.log('║');
+      console.log('║  ¿Cómo aprende? Memoriza qué palabras suelen aparecer en cada tipo');
+      console.log('║  de documento. Cuantos más ejemplos ve, mejor distingue un albarán');
+      console.log('║  de una factura, y mejor acierta el proveedor.');
+      console.log('╚══════════════════════════════════════════════════════════════════╝');
+      console.log('');
+    } else if (result?.reason === 'too_short') {
+      console.log(`🧠 [ML] El documento de tipo "${type}" tenía muy poco texto legible; no se ha podido aprender de él (¿escaneado de baja calidad?).`);
+    }
+  } catch (_) {}
+
+  return result;
 });
 
 ipcMain.handle('ml-classify', async (event, text) => {
-  return mlEngine.classify(text);
+  const r = mlEngine.classify(text);
+  try {
+    if (r?.type) {
+      const pct = Math.round((r.confidence || 0) * 100);
+      const seguridad = r.confianza === 'high' ? 'MUY SEGURO' : r.confianza === 'medium' ? 'bastante seguro' : 'poco seguro';
+      console.log(`🔎 [ML] Zilo cree que este documento es "${r.type}" (${seguridad}, ${pct}% de confianza, basándose en ${r.docCount} ejemplos previos).`);
+    } else {
+      console.log('🔎 [ML] Zilo todavía no reconoce este documento (necesita ver más ejemplos parecidos antes de saber qué es).');
+    }
+  } catch (_) {}
+  return r;
 });
 
 ipcMain.handle('ml-get-stats', async () => {
@@ -1241,11 +1352,23 @@ ipcMain.handle('select-pdf-file', async () => {
   }
 });
 
-ipcMain.handle('open-ocr-zonal-window', async () => {
-  return openOcrZonalWindow();
+ipcMain.handle('open-ocr-zonal-window', async (event, opts) => {
+  return openOcrZonalWindow(opts || {});
 });
 
 ipcMain.on('close-ocr-zonal-window', () => {
+  if (ocrZonalWindow && !ocrZonalWindow.isDestroyed()) {
+    ocrZonalWindow.close();
+  }
+});
+
+// Finalizar desde el renombrado manual: procesar el documento con el tipo creado y cerrar
+ipcMain.on('ocr-zonal-finalize-manual', (event, data) => {
+  ocrZonalFinalizing = true;   // evita el aviso normal de cierre
+  // Pedir a la ventana principal (app.js) que procese el documento manual actual
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('manual-template-created', data || {});
+  }
   if (ocrZonalWindow && !ocrZonalWindow.isDestroyed()) {
     ocrZonalWindow.close();
   }

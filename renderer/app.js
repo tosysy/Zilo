@@ -23,6 +23,9 @@ let ocrIndex           = {};
 let manualRenameQueue    = [];
 let currentManualFile    = null;
 let currentManualFileId  = null;
+let currentManualOcrText = '';
+let currentManualIsHistory  = false;   // corrección desde el historial
+let currentManualHistoryPath = null;   // ruta original del archivo en el historial
 
 // Caché de estadísticas ML (se invalida tras cada entrenamiento)
 let _mlStatsCache = null;
@@ -198,6 +201,9 @@ function setupEventListeners() {
 
     document.getElementById('change-mode-header').addEventListener('click', changeMode);
     document.getElementById('btn-search').addEventListener('click', showSearchModal);
+    document.getElementById('btn-history').addEventListener('click', openHistoryModal);
+    document.getElementById('history-close').addEventListener('click', () => { document.getElementById('history-overlay').style.display = 'none'; });
+    document.getElementById('history-refresh').addEventListener('click', loadHistoryList);
     document.getElementById('btn-theme-toggle').addEventListener('click', toggleTheme);
     document.getElementById('btn-settings').addEventListener('click', showSettingsModal);
     document.getElementById('btn-admin-panel').addEventListener('click', () => window.electronAPI.openAdminPanel());
@@ -423,7 +429,7 @@ async function processFile(file, fileId) {
             let renameText = '', fromParts = false, tplId = null;
             if (_getTypeTemplateIds(currentDocType).length) {
                 updateFileStatus(fileId, 'Extrayendo nombre...', 55);
-                const r = await extractRenameTextForType(file, currentDocType);
+                const r = await extractRenameTextForType(file, currentDocType, text);
                 renameText = r.text || '';
                 fromParts  = r.fromParts || false;
                 tplId      = r.templateId || null;
@@ -438,7 +444,7 @@ async function processFile(file, fileId) {
             } else {
                 const suggested = generateAdaptiveName(file.name, currentDocType, renameText, fromParts);
                 updateFileStatus(fileId, `💡 Confirmar: ${suggested}`, 70);
-                queueForManualRename(file, fileId, currentDocType.name, text, currentDocType, suggested);
+                queueForManualRename(file, fileId, currentDocType.name, text, currentDocType, suggested, tplId);
             }
             return;
         }
@@ -456,14 +462,14 @@ async function processFile(file, fileId) {
                 } else {
                     const suggested = generateAdaptiveName(file.name, matched.type, matched.renameText, matched.fromParts);
                     updateFileStatus(fileId, `💡 ${matched.type.name} — confirmar...`, 70);
-                    queueForManualRename(file, fileId, matched.type.name, text, matched.type, suggested);
+                    queueForManualRename(file, fileId, matched.type.name, text, matched.type, suggested, matched.templateId);
                 }
             } else if (matched && matched.confianza === 'medium') {
                 const suggested = matched.renameText
                     ? generateAdaptiveName(file.name, matched.type, matched.renameText, matched.fromParts)
                     : null;
                 updateFileStatus(fileId, `🟡 Posible: ${matched.type.name} — confirmar...`, 70);
-                queueForManualRename(file, fileId, matched.type.name, text, matched.type, suggested);
+                queueForManualRename(file, fileId, matched.type.name, text, matched.type, suggested, matched.templateId);
             } else {
                 updateFileStatus(fileId, '⚠️ Tipo no detectado → revisión manual', 70);
                 queueForManualRename(file, fileId, null, text);
@@ -494,7 +500,9 @@ async function _loadPdfCanvases(filePath) {
         const c    = document.createElement('canvas');
         c.width = vp.width; c.height = vp.height;
         await page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
-        cache[pageIndex] = { canvas: c, vp, page }; // 'page' necesario para getTextContent()
+        // Auto-enderezar el escaneo para que las zonas encajen con los datos
+        const straight = _autoDeskew(c, null);
+        cache[pageIndex] = { canvas: straight, vp, page }; // 'page' necesario para getTextContent()
         return cache[pageIndex];
     }
 
@@ -543,19 +551,170 @@ async function _findAnchorY(pdfPage, anchorText) {
     return null;
 }
 
+// =================================================================================
+// AUTO-ENDEREZADO DE ESCANEOS (corrección de inclinación)
+// =================================================================================
+
+/**
+ * Detecta el ángulo de inclinación de un documento por "perfil de proyección":
+ * el ángulo que alinea mejor las líneas de texto en horizontal.
+ * @returns {number} grados (positivo = horario), 0 si no hay inclinación clara.
+ */
+function _detectSkewAngle(srcCanvas) {
+    try {
+        const targetW = 500;
+        const scale = Math.min(1, targetW / srcCanvas.width);
+        const w = Math.max(1, Math.round(srcCanvas.width * scale));
+        const h = Math.max(1, Math.round(srcCanvas.height * scale));
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        const ctx = c.getContext('2d');
+        ctx.drawImage(srcCanvas, 0, 0, w, h);
+        const px = ctx.getImageData(0, 0, w, h).data;
+
+        // Binarizar: píxel oscuro (texto) = 1
+        const dark = new Uint8Array(w * h);
+        for (let i = 0; i < w * h; i++) {
+            const g = 0.299 * px[i*4] + 0.587 * px[i*4+1] + 0.114 * px[i*4+2];
+            dark[i] = g < 140 ? 1 : 0;
+        }
+
+        const cx = w / 2;
+        const variance = (angleDeg) => {
+            const tan = Math.tan(angleDeg * Math.PI / 180);
+            const proj = new Float64Array(h);
+            for (let y = 0; y < h; y++) {
+                for (let x = 0; x < w; x++) {
+                    if (dark[y * w + x]) {
+                        const ny = Math.round(y + (x - cx) * tan);
+                        if (ny >= 0 && ny < h) proj[ny]++;
+                    }
+                }
+            }
+            let mean = 0; for (let y = 0; y < h; y++) mean += proj[y]; mean /= h;
+            let v = 0; for (let y = 0; y < h; y++) { const d = proj[y] - mean; v += d * d; }
+            return v;
+        };
+
+        const base = variance(0);
+        let bestAngle = 0, bestScore = base;
+        for (let a = -8; a <= 8; a += 0.5) {
+            if (a === 0) continue;
+            const v = variance(a);
+            if (v > bestScore) { bestScore = v; bestAngle = a; }
+        }
+        // Solo si la mejora es clara (>12%) y el ángulo es significativo
+        if (bestAngle !== 0 && Math.abs(bestAngle) >= 0.5 && bestScore > base * 1.12) {
+            return bestAngle;
+        }
+    } catch (_) {}
+    return 0;
+}
+
+/** Rota un canvas para corregir la inclinación detectada. */
+function _deskewCanvas(srcCanvas, angleDeg) {
+    if (!angleDeg || Math.abs(angleDeg) < 0.5) return srcCanvas;
+    const w = srcCanvas.width, h = srcCanvas.height;
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = 'white'; ctx.fillRect(0, 0, w, h);
+    ctx.translate(w / 2, h / 2);
+    ctx.rotate(-angleDeg * Math.PI / 180);   // corregir = girar al revés
+    ctx.translate(-w / 2, -h / 2);
+    ctx.drawImage(srcCanvas, 0, 0);
+    return c;
+}
+
+/** Detecta y corrige la inclinación de un canvas (si la hay). */
+function _autoDeskew(srcCanvas, logName) {
+    const angle = _detectSkewAngle(srcCanvas);
+    if (angle) {
+        try { window.electronAPI.logToCmd(`📐 Documento${logName ? ' "'+logName+'"' : ''} inclinado ${angle.toFixed(1)}° → lo enderezo antes de leer las zonas.`); } catch (_) {}
+        return _deskewCanvas(srcCanvas, angle);
+    }
+    return srcCanvas;
+}
+
 /**
  * OCR de una zona recortada de un canvas.
  * Igual que hace la ventana de entrenamiento — más fiable que filtrar por bbox.
  */
 async function _ocrCrop(canvas, vp, normRect) {
+    return _ocrCropSmart(canvas, vp, normRect, {});
+}
+
+// Worker de Tesseract para OCR numérico (solo dígitos) — reutilizable
+let _numOcrWorker = null;
+let _numOcrWorkerPromise = null;
+async function _getNumOcrWorker() {
+    if (_numOcrWorker) return _numOcrWorker;
+    if (_numOcrWorkerPromise) return _numOcrWorkerPromise;
+    _numOcrWorkerPromise = (async () => {
+        const w = await Tesseract.createWorker('eng');   // 'eng' acierta más con dígitos
+        await w.setParameters({
+            tessedit_char_whitelist: '0123456789-/.',
+            tessedit_pageseg_mode: '7',                   // tratar como una sola línea
+        });
+        _numOcrWorker = w;
+        return w;
+    })();
+    return _numOcrWorkerPromise;
+}
+
+/**
+ * Recorta una zona, la PREPROCESA (escala + gris + umbral) y hace OCR.
+ * Con opts.numeric=true usa un OCR restringido a dígitos (mucho más fiable
+ * para números de albarán/pedido).
+ */
+async function _ocrCropSmart(canvas, vp, normRect, opts = {}) {
     const zx = normRect.x * vp.width,  zy = normRect.y * vp.height;
     const zw = normRect.w * vp.width,  zh = normRect.h * vp.height;
+
+    // Upscale ×2 sobre el canvas (que ya está a 3x) → texto pequeño más legible
+    const SCALE = 2;
+    const cw = Math.max(1, Math.round(zw * SCALE));
+    const ch = Math.max(1, Math.round(zh * SCALE));
     const crop = document.createElement('canvas');
-    crop.width  = Math.max(1, Math.round(zw));
-    crop.height = Math.max(1, Math.round(zh));
-    crop.getContext('2d').drawImage(canvas, zx, zy, zw, zh, 0, 0, zw, zh);
-    const { data } = await Tesseract.recognize(crop.toDataURL('image/png'), 'spa');
-    return data.text.replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim();
+    crop.width = cw; crop.height = ch;
+    const ctx = crop.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(canvas, zx, zy, zw, zh, 0, 0, cw, ch);
+
+    // Escala de grises + umbral (binariza) → limpia ruido del escaneo
+    try {
+        const img = ctx.getImageData(0, 0, cw, ch);
+        const d = img.data;
+        for (let i = 0; i < d.length; i += 4) {
+            const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+            const v = g > 145 ? 255 : 0;
+            d[i] = d[i + 1] = d[i + 2] = v;
+        }
+        ctx.putImageData(img, 0, 0);
+    } catch (_) {}
+
+    const url = crop.toDataURL('image/png');
+
+    if (opts.numeric) {
+        try {
+            const w = await _getNumOcrWorker();
+            const { data } = await w.recognize(url);
+            const t = (data.text || '').replace(/\s+/g, ' ').trim();
+            if (t) return t;
+        } catch (_) {}
+    }
+
+    const { data } = await Tesseract.recognize(url, 'spa');
+    return (data.text || '').replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/** ¿La parte busca un valor numérico? (para activar OCR de solo dígitos) */
+function _partIsNumeric(part) {
+    if (!part) return false;
+    if (part.transform === 'numbers_only' || part.transform === 'strip_zeros') return true;
+    const lbl = (part.label || '').toLowerCase();
+    return /n[uú]m|numero|pedido|albar|factura|ref|c[oó]digo|importe|nif|cif/.test(lbl);
 }
 
 // =================================================================================
@@ -669,19 +828,134 @@ function _recordPositionAsync(templateId, part, pg, usedRect, foundText, source)
  * @param {object} part     - parte OCR (necesitamos part.label, part.page)
  * @returns {Promise<string>}
  */
+/**
+ * Puntúa si un texto extraído es el DATO buscado o una etiqueta/ruido.
+ * Penaliza etiquetas ("Nº ALBARAN", "FECHA"…). Premia números si numeric.
+ */
+function _scoreCandidate(txt, numeric) {
+    if (!txt || !txt.trim()) return -1;
+    const t = _normalizeText(txt);
+    const labels = ['albaran','numero','num','fecha','codigo','cliente','pedido',
+                    'referencia','descripcion','pagina','copia','cantidad','precio',
+                    'importe','total','iva','base','forma','pago','direccion'];
+    const isLabel = labels.some(l => t.includes(l));
+    if (numeric) {
+        const digits = (txt.match(/\d/g) || []).length;
+        const letters = (txt.match(/[a-zA-Z]/g) || []).length;
+        if (digits < 2) return isLabel ? 0 : 0.1;
+        // muchos dígitos y pocas letras = buen número; etiqueta penaliza
+        let s = 1 + Math.min(digits, 10) * 0.05 - letters * 0.05;
+        if (isLabel) s -= 0.6;
+        return s;
+    }
+    if (isLabel) return 0.2;
+    return 0.5 + Math.min(1, txt.trim().length / 12);
+}
+
+/**
+ * Búsqueda LOCAL: si el recuadro cae sobre la etiqueta y no sobre el dato,
+ * prueba a desplazarlo por los alrededores (abajo, arriba, lados) y se queda
+ * con la variante que mejor encaja con lo buscado (un número, normalmente).
+ * @returns {{ text, rect, score }}
+ */
+async function _localZoneSearch(pg, rect, numeric) {
+    const dh = rect.h, dw = rect.w;
+    const offsets = [
+        { dx: 0,        dy: 0 },
+        { dx: 0,        dy: dh * 0.9 },   // justo debajo (cabecera → valor)
+        { dx: 0,        dy: dh * 1.7 },
+        { dx: 0,        dy: -dh * 0.9 },  // justo encima
+        { dx: dw * 0.6, dy: dh * 0.9 },
+        { dx: -dw * 0.6, dy: dh * 0.9 },
+        { dx: dw * 0.6, dy: 0 },
+        { dx: -dw * 0.6, dy: 0 },
+        { dx: 0,        dy: dh * 0.45 },
+    ];
+    let best = { text: '', rect, score: -1 };
+    for (const o of offsets) {
+        const r = {
+            x: Math.max(0, Math.min(0.98 - dw, rect.x + o.dx)),
+            y: Math.max(0, Math.min(0.98 - dh, rect.y + o.dy)),
+            w: dw, h: dh,
+        };
+        const txt = await _ocrCropSmart(pg.canvas, pg.vp, r, { numeric });
+        const sc  = _scoreCandidate(txt, numeric);
+        if (sc > best.score) best = { text: txt, rect: r, score: sc };
+        if (sc >= 1.2) break;   // ya es claramente un buen número
+    }
+    return best;
+}
+
 async function _ocrCropWithLearning(pg, rect, tpl, part) {
     const templateId = tpl?.id;
     const partLabel  = part.label || part.id || 'part';
     const page       = part.page  || 0;
+    const numeric    = _partIsNumeric(part);   // OCR de solo dígitos si es un número
+
+    // ── 0. ¿Hay una corrección del usuario para esta parte? Tiene prioridad ────
+    // Si el usuario ya marcó dónde está el dato, usamos ESA zona SIEMPRE,
+    // por encima de la zona original (que puede estar leyendo el campo equivocado).
+    if (templateId) {
+        try {
+            const learned = await window.electronAPI.getAdaptiveZone({
+                templateId, partLabel, page, originalRect: rect,
+            });
+            if (learned && learned.userConfirmed) {
+                const textU = await _ocrCropSmart(pg.canvas, pg.vp, learned, { numeric });
+                if (textU.trim()) {
+                    window.electronAPI.logToCmd(`✏️  CAMPO "${partLabel}": uso la zona que TÚ corregiste (${learned.confidence} corrección/es). Ya no leo del campo equivocado de antes. Leído: "${textU.slice(0,30)}"`);
+                    _recordPositionAsync(templateId, part, pg, learned, textU, 'adaptive');
+                    return textU;
+                }
+            }
+        } catch (_) {}
+    }
 
     // ── 1. Zona original ──────────────────────────────────────────────────────
-    const text1 = await _ocrCrop(pg.canvas, pg.vp, rect);
-    if (text1.trim()) {
+    const text1 = await _ocrCropSmart(pg.canvas, pg.vp, rect, { numeric });
+    const score1 = _scoreCandidate(text1, numeric);
+
+    // Si el recuadro lee bien el dato (buena puntuación), usarlo
+    if (score1 >= 1) {
         _recordPositionAsync(templateId, part, pg, rect, text1, 'ocr');
         return text1;
     }
 
-    // ── 2. Zona adaptativa aprendida ──────────────────────────────────────────
+    // ── 1b. Búsqueda LOCAL: el recuadro cayó sobre la etiqueta o ruido →
+    //        desplazarlo por los alrededores hasta encontrar el dato ──────────
+    if (numeric || score1 < 0.3) {
+        // Primero: ¿ya aprendí dónde está (de búsquedas anteriores)? → 1 lectura
+        if (templateId) {
+            try {
+                const adaptive = await window.electronAPI.getAdaptiveZone({ templateId, partLabel, page, originalRect: rect });
+                if (adaptive && adaptive.confidence >= 2) {
+                    const txtA = await _ocrCropSmart(pg.canvas, pg.vp, adaptive, { numeric });
+                    if (_scoreCandidate(txtA, numeric) >= 1) {
+                        _recordPositionAsync(templateId, part, pg, adaptive, txtA, 'adaptive');
+                        return txtA;
+                    }
+                }
+            } catch (_) {}
+        }
+        // Si no, búsqueda local completa por los alrededores
+        try {
+            const found = await _localZoneSearch(pg, rect, numeric);
+            if (found.score > score1 && found.score >= 0.8 && found.text.trim()) {
+                const moved = (Math.abs(found.rect.x - rect.x) + Math.abs(found.rect.y - rect.y));
+                window.electronAPI.logToCmd(`🔀 CAMPO "${partLabel}": el recuadro caía sobre la etiqueta; lo desplacé ${(moved*100).toFixed(0)}% y encontré el dato: "${found.text.slice(0,30)}"`);
+                _recordPositionAsync(templateId, part, pg, found.rect, found.text, 'ocr');
+                return found.text;
+            }
+        } catch (_) {}
+    }
+
+    // Si la original dio algo (aunque flojo) y la búsqueda no mejoró, usarlo
+    if (text1.trim() && score1 > 0.1) {
+        _recordPositionAsync(templateId, part, pg, rect, text1, 'ocr');
+        return text1;
+    }
+
+    // ── 2. Zona adaptativa aprendida (auto, sin corrección explícita) ─────────
     if (templateId) {
         try {
             const adaptive = await window.electronAPI.getAdaptiveZone({
@@ -689,12 +963,11 @@ async function _ocrCropWithLearning(pg, rect, tpl, part) {
             });
 
             if (adaptive && adaptive.confidence >= 3) {
-                // Comprobar que la zona aprendida difiere significativamente
                 const drift = Math.abs(adaptive.centerX - (rect.x + rect.w / 2))
                             + Math.abs(adaptive.centerY - (rect.y + rect.h / 2));
 
                 if (drift > 0.02) {
-                    const text2 = await _ocrCrop(pg.canvas, pg.vp, adaptive);
+                    const text2 = await _ocrCropSmart(pg.canvas, pg.vp, adaptive, { numeric });
                     if (text2.trim()) {
                         console.log(
                             `[AdaptZone] "${partLabel}": zona aprendida usada` +
@@ -799,14 +1072,43 @@ function _normalizeText(t) {
         .replace(/\s+/g, ' ').trim();
 }
 
-/** Similitud de texto por palabras en común (normalizada). */
+/** Extrae secuencias de dígitos largas (CIF, NIF, nº de cuenta…) de un texto. */
+function _extractDigitRuns(t) {
+    const digits = (t || '').replace(/[^0-9]/g, ' ').split(/\s+/).filter(d => d.length >= 6);
+    // También la concatenación de todos los dígitos (por si el CIF sale partido)
+    const allDigits = (t || '').replace(/[^0-9]/g, '');
+    if (allDigits.length >= 7) digits.push(allDigits);
+    return [...new Set(digits)];
+}
+
+/**
+ * Similitud entre el texto extraído de la zona de identificación y el guardado.
+ * Combina coincidencia de palabras + coincidencia FUERTE de CIF/NIF (dígitos).
+ * Un CIF que coincide es una señal casi definitiva del proveedor correcto.
+ */
 function _similarity(extracted, saved) {
     if (!extracted || !saved) return 0;
     const normSaved = _normalizeText(saved);
     const normExt   = _normalizeText(extracted);
+
+    // 1. Coincidencia de palabras (la base)
     const words = normSaved.split(/\s+/).filter(w => w.length > 2);
-    if (!words.length) return 0;
-    return words.filter(w => normExt.includes(w)).length / words.length;
+    const wordScore = words.length
+        ? words.filter(w => normExt.includes(w)).length / words.length
+        : 0;
+
+    // 2. Coincidencia de CIF/NIF (secuencias de dígitos largas)
+    const savedDigits = _extractDigitRuns(saved);
+    const extDigitsStr = (extracted || '').replace(/[^0-9]/g, '');
+    let digitMatch = false;
+    for (const d of savedDigits) {
+        if (d.length >= 6 && extDigitsStr.includes(d)) { digitMatch = true; break; }
+    }
+
+    // Si el CIF coincide → señal muy fuerte (mínimo 0.9, sumado al de palabras)
+    if (digitMatch) return Math.min(1, Math.max(0.9, wordScore + 0.5));
+
+    return wordScore;
 }
 
 /**
@@ -918,9 +1220,108 @@ async function _searchTextByKeyword(getCanvas, pageIndex, before, after) {
  * Construye el nombre de archivo desde las partes de una plantilla.
  * Soporta el nuevo formato (renameParts) y el antiguo (rename.rect) para compatibilidad.
  */
-async function _buildRenameText(getCanvas, tpl) {
+/**
+ * Busca un valor en el texto OCR completo usando la etiqueta del campo como
+ * referencia. Inmune a inclinación/desplazamiento del escaneo, porque encuentra
+ * el dato por CONTENIDO, no por posición.
+ *
+ * @param {string} fullText - texto OCR completo del documento
+ * @param {string} label    - etiqueta del campo (ej: "Nº Albarán")
+ * @param {boolean} numeric - si el valor esperado es un número
+ */
+function _findValueByLabelInText(fullText, label, numeric) {
+    if (!fullText || !label) return '';
+    const txt = fullText.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+
+    // Palabra clave: la más significativa de la etiqueta
+    const stop = ['numero', 'num', 'dato', 'campo', 'valor', 'del', 'los', 'las'];
+    const words = label.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+        .split(/\s+/).filter(w => w.length >= 4 && !stop.includes(w));
+    const keyword = words[words.length - 1] || label.toLowerCase().trim();
+    if (keyword.length < 3) return '';
+
+    const idx = txt.indexOf(keyword);
+    if (idx === -1) return '';
+
+    const after = txt.slice(idx + keyword.length, idx + keyword.length + 50);
+    if (numeric) {
+        const m = after.match(/[0-9][0-9.\-\/ ]{0,15}[0-9]/);
+        if (m) return m[0].replace(/\s/g, '');
+    }
+    const w = after.replace(/^[\s:.\-\/]+/, '').split(/\s+/)[0];
+    return w || '';
+}
+
+/** Cuántos dígitos de `exp` aparecen en orden dentro de `act` (0-1). */
+function _digitSubseqScore(exp, act) {
+    if (!exp || !act) return 0;
+    if (act.includes(exp)) return 1;
+    let matches = 0, j = 0;
+    for (let i = 0; i < act.length && j < exp.length; i++) {
+        if (act[i] === exp[j]) { matches++; j++; }
+    }
+    return matches / exp.length;
+}
+
+/**
+ * REGISTRO GLOBAL por el NIF: localiza dónde está realmente el CIF de la
+ * plantilla buscándolo alrededor de la zona de identificación, y calcula el
+ * desplazamiento (dx, dy) del documento. Ese mismo desplazamiento se aplica a
+ * TODOS los recuadros OCR para que queden alineados.
+ *
+ * @returns {{dx, dy, confident, score}}
+ */
+async function _findIdZoneOffset(pg, idRect, expectedDigitsList) {
+    if (!idRect || !expectedDigitsList?.length) return { dx: 0, dy: 0, confident: false, score: 0 };
+    const exps = expectedDigitsList.filter(d => d && d.length >= 7);
+    if (!exps.length) return { dx: 0, dy: 0, confident: false, score: 0 };
+
+    const dh = idRect.h, dw = idRect.w;
+    const ySteps = [0, 0.6, -0.6, 1.2, -1.2, 1.8, -1.8];
+    const xSteps = [0, 0.5, -0.5, 1, -1];
+
+    let best = { dx: 0, dy: 0, score: 0, found: '' };
+    let done = false;
+    for (const sy of ySteps) {
+        if (done) break;
+        for (const sx of xSteps) {
+            const r = {
+                x: Math.max(0, Math.min(0.98 - dw, idRect.x + sx * dw)),
+                y: Math.max(0, Math.min(0.98 - dh, idRect.y + sy * dh)),
+                w: dw, h: dh,
+            };
+            const txt = await _ocrCropSmart(pg.canvas, pg.vp, r, { numeric: true });
+            const d   = txt.replace(/[^0-9]/g, '');
+            if (d.length < 5) continue;
+            let sim = 0;
+            for (const e of exps) sim = Math.max(sim, _digitSubseqScore(e, d));
+            if (sim > best.score) {
+                best = { dx: r.x - idRect.x, dy: r.y - idRect.y, score: sim, found: txt };
+                if (sim >= 0.99) { done = true; break; }
+            }
+        }
+    }
+    return { ...best, confident: best.score >= 0.85 };
+}
+
+async function _buildRenameText(getCanvas, tpl, fullOcrText = '') {
     // Nuevo formato: array de partes
     if (Array.isArray(tpl.renameParts) && tpl.renameParts.length) {
+        // ── REGISTRO GLOBAL: alinear todos los recuadros usando el NIF ────────
+        let gOffset = tpl._gOffset || { dx: 0, dy: 0 };   // puede venir precalculado de la detección
+        if (!tpl._gOffset && tpl.identification?.rect) {
+            try {
+                const expDigits = [..._extractCifCandidates(tpl.identification.text || ''), ...(tpl.knownCifs || [])]
+                    .map(c => c.replace(/[^0-9]/g, '')).filter(d => d.length >= 7);
+                const pgId = await getCanvas(tpl.identification.page || 0);
+                const off  = await _findIdZoneOffset(pgId, tpl.identification.rect, expDigits);
+                if (off.confident && (Math.abs(off.dx) > 0.002 || Math.abs(off.dy) > 0.002)) {
+                    gOffset = { dx: off.dx, dy: off.dy };
+                    window.electronAPI.logToCmd(`📍 Alineé el documento por el NIF (${Math.round(off.score*100)}% de certeza): desplazo TODOS los recuadros ${(off.dx*100).toFixed(1)}% en X y ${(off.dy*100).toFixed(1)}% en Y.`);
+                }
+            } catch (_) {}
+        }
+
         const segments = [];
         for (const part of tpl.renameParts) {
             if (part.type === 'text') {
@@ -938,7 +1339,12 @@ async function _buildRenameText(getCanvas, tpl) {
                 segments.push(text);
             } else if (part.type === 'ocr' && part.rect) {
                 const pg  = await getCanvas(part.page || 0);
-                let rect  = part.rect;
+                // Aplicar el desplazamiento global calculado con el NIF
+                let rect  = {
+                    ...part.rect,
+                    x: Math.max(0, Math.min(0.98 - part.rect.w, part.rect.x + gOffset.dx)),
+                    y: Math.max(0, Math.min(0.98 - part.rect.h, part.rect.y + gOffset.dy)),
+                };
 
                 // ── Palabra ancla: ajustar zona Y si el layout ha cambiado ─────
                 if (part.anchor?.text && part.anchor?.refY != null) {
@@ -956,6 +1362,20 @@ async function _buildRenameText(getCanvas, tpl) {
 
                 // ── Extracción con aprendizaje de posición (cascada 3 niveles) ──
                 let text = await _ocrCropWithLearning(pg, rect, tpl, part);
+
+                // ── Fallback inmune a inclinación: buscar por la ETIQUETA en el
+                //    texto completo si la zona no dio nada o dio algo no numérico ─
+                const numeric = _partIsNumeric(part);
+                const rawDigits = (text || '').replace(/[^0-9]/g, '');
+                const zonaFallo = !text.trim() || (numeric && rawDigits.length < 2);
+                if (zonaFallo && fullOcrText && part.label) {
+                    const byLabel = _findValueByLabelInText(fullOcrText, part.label, numeric);
+                    if (byLabel) {
+                        window.electronAPI.logToCmd(`🧭 CAMPO "${part.label}": el recuadro falló (documento torcido/desplazado), pero lo encontré por su etiqueta en el texto: "${byLabel}"`);
+                        text = byLabel;
+                    }
+                }
+
                 text = _applyPartTransform(text, part.transform || 'none');
                 segments.push(text);
             }
@@ -1001,7 +1421,7 @@ async function detectDocumentType(file, ocrText) {
         let renameText = '', fromParts = false, templateId = null;
         if (_getTypeTemplateIds(mlType).length) {
             try {
-                const r  = await extractRenameTextForType(file, mlType);
+                const r  = await extractRenameTextForType(file, mlType, ocrText);
                 renameText = r.text || '';
                 fromParts  = r.fromParts || false;
                 templateId = r.templateId || null;
@@ -1019,7 +1439,7 @@ async function detectDocumentType(file, ocrText) {
     }
 
     // ── Detección por zonas OCR (con hint ML como filtro) ────────────────────
-    const zoneResult = await detectTypeByOcrZonal(file, mlType);
+    const zoneResult = await detectTypeByOcrZonal(file, mlType, ocrText);
     if (zoneResult) {
         // Fallback: si las zonas detectaron el tipo pero no extrajeron rename text
         if (!zoneResult.renameText && ocrText) {
@@ -1040,12 +1460,68 @@ async function detectDocumentType(file, ocrText) {
     return null;
 }
 
+/** Dígitos de una cadena CIF/NIF. */
+function _cifDigits(s) { return (s || '').replace(/[^0-9]/g, ''); }
+
+/**
+ * CIFs que aparecen en 2+ plantillas → NO sirven para distinguir proveedor
+ * (típicamente el NIF de tu propia empresa, que está en todos los documentos).
+ */
+function _buildCommonCifSet(allTemplates) {
+    const counts = {};
+    for (const t of allTemplates) {
+        const cifs = new Set([
+            ..._extractCifCandidates(t.identification?.text || ''),
+            ...(t.knownCifs || []),
+        ].map(_cifDigits).filter(d => d.length >= 7));
+        for (const d of cifs) counts[d] = (counts[d] || 0) + 1;
+    }
+    const common = new Set();
+    for (const [d, n] of Object.entries(counts)) if (n >= 2) common.add(d);
+    return common;
+}
+
+/**
+ * Puntúa cuánto encaja una plantilla con un documento, priorizando el NOMBRE
+ * del proveedor (membrete) en el texto completo, que es el discriminador real.
+ * El CIF solo cuenta si es ÚNICO de esa plantilla (no compartido).
+ */
+function _templateMatchScore(tpl, fullOcrText, commonCifs) {
+    const text = _normalizeText(fullOcrText || '');
+
+    // 1. Palabras del proveedor: del membrete/identificación Y del nombre de la
+    //    plantilla (ej: "SANVICOR ALBARAN" → "sanvicor"). Robusto aunque la zona
+    //    naranja haya capturado el CIF en vez del nombre.
+    const genericWords = new Set(['albaran','factura','pedido','entrada','dua','documento','copia','original','herramientas','industriales']);
+    const idWords = [
+        ..._normalizeText(tpl.identification?.text || '').split(/\s+/),
+        ..._normalizeText(tpl.nombre || '').split(/\s+/),
+    ].filter(w => w.length >= 4 && !/^\d+$/.test(w) && !genericWords.has(w));
+    const uniqWords = [...new Set(idWords)];
+    const nameScore = uniqWords.length
+        ? uniqWords.filter(w => text.includes(w)).length / uniqWords.length
+        : 0;
+
+    // 2. CIF ÚNICO (no compartido) que aparece en el documento
+    const cifs = [..._extractCifCandidates(tpl.identification?.text || ''), ...(tpl.knownCifs || [])]
+        .map(_cifDigits).filter(d => d.length >= 7 && !commonCifs.has(d));
+    const docDigits = _cifDigits(fullOcrText);
+    const cifMatch = cifs.some(c => docDigits.includes(c) || _digitsFuzzyIncluded(c, docDigits, 1));
+
+    // El NOMBRE manda. El CIF solo refuerza FUERTE si el nombre también encaja
+    // (si coincide el CIF pero el nombre no, ese CIF es sospechoso: NIF compartido).
+    let score = nameScore;
+    if (cifMatch && nameScore >= 0.25) score = Math.max(score, 0.9);
+    else if (cifMatch)                 score = Math.max(score, nameScore + 0.1);
+    return { score, nameScore, cifMatch };
+}
+
 /**
  * Detecta el tipo de documento y extrae el texto de renombrado usando zonas visuales.
  * Itera TODOS los tipos y TODAS sus plantillas vinculadas → elige la mejor coincidencia global.
  * @param {object|null} mlHint - Tipo sugerido por ML (prioriza ese tipo si hay empate)
  */
-async function detectTypeByOcrZonal(file, mlHint = null) {
+async function detectTypeByOcrZonal(file, mlHint = null, fullOcrText = '') {
     const typesWithTemplate = userDocTypes.filter(t => _getTypeTemplateIds(t).length > 0);
     if (!typesWithTemplate.length) return null;
 
@@ -1058,41 +1534,142 @@ async function detectTypeByOcrZonal(file, mlHint = null) {
     const getCanvas = await _loadPdfCanvases(file.path);
     if (!getCanvas) return null;
 
+    // CIFs compartidos entre plantillas (NIF de tu empresa…) → NO sirven para identificar
+    const commonCifs = _buildCommonCifSet(allTemplates);
+    if (commonCifs.size) {
+        window.electronAPI.logToCmd(`ℹ️ Ignoro estos CIF por aparecer en varias plantillas (NIF propio/compartido): ${[...commonCifs].join(', ')}`);
+    }
+
+    window.electronAPI.logToCmd(`🎯 Analizando "${file.name}" — busco el NIF del proveedor en la ZONA DE IDENTIFICACIÓN (obligatorio para clasificar)...`);
+
     let best = null, bestScore = 0;
 
     for (const type of typesWithTemplate) {
-        const tplIds = _getTypeTemplateIds(type);
-
-        for (const tplId of tplIds) {
+        for (const tplId of _getTypeTemplateIds(type)) {
             const tpl = tplMap[tplId];
-            if (!tpl?.identification?.rect) continue;
-            // Debe tener al menos un sistema de renombrado válido
+            if (!tpl) continue;
             const hasRename = (Array.isArray(tpl.renameParts) && tpl.renameParts.length) || tpl.rename?.rect;
-            if (!hasRename) continue;
+            if (!hasRename || !tpl.identification?.rect) continue;
 
-            // Extraer y comparar zona de identificación
-            const id    = await getCanvas(tpl.identification.page || 0);
-            const idTxt = await _ocrCrop(id.canvas, id.vp, tpl.identification.rect);
-            const score = _similarity(idTxt, tpl.identification.text);
+            // CIF ÚNICO de esta plantilla (excluyendo el NIF propio/compartido)
+            const uniqueCifs = [..._extractCifCandidates(tpl.identification.text || ''), ...(tpl.knownCifs || [])]
+                .map(_cifDigits).filter(d => d.length >= 7 && !commonCifs.has(d));
 
-            // Pequeño bonus si ML sugirió este mismo tipo (desempate)
-            const adjustedScore = score + (mlHint && mlHint.id === type.id ? 0.02 : 0);
+            if (!uniqueCifs.length) {
+                window.electronAPI.logToCmd(`   · "${tpl.nombre}": ⚠️ sin CIF propio guardado → no puede identificarse por NIF (revisa su zona naranja).`);
+                continue;
+            }
 
-            if (score >= 0.6 && adjustedScore > bestScore) {
-                const renameText = await _buildRenameText(getCanvas, tpl);
-                bestScore = adjustedScore;
-                best = {
-                    type,
-                    renameText,
-                    fromParts:  Array.isArray(tpl.renameParts) && tpl.renameParts.length > 0,
-                    templateId: tpl.id,
-                    confianza:  score >= 0.85 ? 'high' : 'medium'
-                };
+            // ── REQUISITO: encontrar ese CIF en/cerca de la zona de identificación ─
+            const pgId = await getCanvas(tpl.identification.page || 0);
+            const reg  = await _findIdZoneOffset(pgId, tpl.identification.rect, uniqueCifs);
+
+            window.electronAPI.logToCmd(`   · "${tpl.nombre}": NIF encontrado al ${Math.round(reg.score*100)}% en la zona de identificación${reg.found ? ` (leyó "${reg.found.slice(0,20)}")` : ''}`);
+
+            if (reg.confident && reg.score > bestScore) {
+                bestScore = reg.score;
+                best = { type, tpl, offset: { dx: reg.dx, dy: reg.dy }, score: reg.score };
             }
         }
     }
 
-    return best;
+    // ── ESTRICTO: sin NIF de proveedor confirmado → NO se clasifica ───────────
+    if (!best) {
+        window.electronAPI.logToCmd('   ⛔ No encontré el NIF de ningún proveedor en la zona de identificación → NO asigno plantilla. El documento va a REVISIÓN MANUAL.');
+        return null;
+    }
+
+    // Construir el nombre con el desplazamiento ya calculado por el NIF
+    const tplForBuild = { ...best.tpl, _gOffset: best.offset };
+    const renameText  = await _buildRenameText(getCanvas, tplForBuild, fullOcrText);
+
+    window.electronAPI.logToCmd(`   ✅ ELEGIDA la plantilla "${best.tpl.nombre}" (tipo ${best.type.name}) — NIF confirmado al ${Math.round(best.score*100)}%.`);
+
+    return {
+        type: best.type,
+        renameText,
+        fromParts:  Array.isArray(best.tpl.renameParts) && best.tpl.renameParts.length > 0,
+        templateId: best.tpl.id,
+        confianza:  best.score >= 0.90 ? 'high' : 'medium',
+        _tplNombre: best.tpl.nombre,
+    };
+}
+
+/**
+ * Comprueba si el CIF/NIF guardado en el texto de identificación de una plantilla
+ * aparece en el texto completo del documento, tolerando errores de OCR.
+ *
+ * @param {string} savedIdText  - texto de identificación de la plantilla (contiene el CIF)
+ * @param {string} fullOcrText  - texto OCR completo del documento
+ * @param {string} docDigitText - fullOcrText sin separadores (precalculado)
+ */
+function _cifAppearsInText(savedIdText, fullOcrText, docDigitText) {
+    if (!savedIdText || !fullOcrText) return false;
+
+    // Posibles CIF/NIF en el texto guardado: letra opcional + 7-8 dígitos
+    const candidates = _extractCifCandidates(savedIdText);
+    if (!candidates.length) return false;
+
+    const docDigits = (docDigitText || fullOcrText.replace(/[^0-9]/g, ''));
+    const docDigitsOnly = fullOcrText.replace(/[^0-9]/g, '');
+
+    for (const cif of candidates) {
+        const cifDigits = cif.replace(/[^0-9]/g, '');
+        if (cifDigits.length < 7) continue;
+
+        // 1. Coincidencia exacta de la secuencia de dígitos
+        if (docDigitsOnly.includes(cifDigits)) return true;
+
+        // 2. Coincidencia tolerante: permitir 1 dígito mal leído por OCR
+        if (_digitsFuzzyIncluded(cifDigits, docDigitsOnly, 1)) return true;
+    }
+    return false;
+}
+
+/** Extrae posibles CIF/NIF (ej: B36979128, 36979128, 12345678Z) de un texto. */
+function _extractCifCandidates(text) {
+    const out = [];
+    const norm = (text || '').toUpperCase();
+    // Patrón: letra opcional + 7-8 dígitos + letra opcional
+    const re = /[A-Z]?\s?[-]?\s?\d[\d\.\-\s]{6,10}\d[A-Z]?/g;
+    let m;
+    while ((m = re.exec(norm)) !== null) {
+        const digits = m[0].replace(/[^0-9]/g, '');
+        if (digits.length >= 7 && digits.length <= 9) out.push(m[0].replace(/\s/g, ''));
+    }
+    return [...new Set(out)];
+}
+
+/**
+ * Extrae SOLO el CIF/NIF que aparece junto a la etiqueta "CIF" o "NIF".
+ * Evita confundir el CIF del proveedor con el del cliente u otros números.
+ */
+function _extractCifNearKeyword(text) {
+    const norm = (text || '').toUpperCase();
+    const out = [];
+    const re = /(?:C\.?\s*I\.?\s*F\.?|N\.?\s*I\.?\s*F\.?)[\s.:/_-]*([A-Z]?\s?-?\s?\d[\d.\-\s]{6,10}\d[A-Z]?)/g;
+    let m;
+    while ((m = re.exec(norm)) !== null) {
+        const digits = (m[1] || '').replace(/[^0-9]/g, '');
+        if (digits.length >= 7 && digits.length <= 9) out.push(m[1].replace(/\s/g, ''));
+    }
+    return [...new Set(out)];
+}
+
+/** ¿La secuencia `needle` aparece en `haystack` permitiendo `maxErrors` dígitos distintos? */
+function _digitsFuzzyIncluded(needle, haystack, maxErrors = 1) {
+    const n = needle.length;
+    if (n === 0 || haystack.length < n) return false;
+    for (let i = 0; i + n <= haystack.length; i++) {
+        let errors = 0;
+        for (let j = 0; j < n; j++) {
+            if (haystack[i + j] !== needle[j]) {
+                if (++errors > maxErrors) break;
+            }
+        }
+        if (errors <= maxErrors) return true;
+    }
+    return false;
 }
 
 /**
@@ -1101,7 +1678,7 @@ async function detectTypeByOcrZonal(file, mlHint = null) {
  * y elige la que mejor encaje con el documento actual (ej: proveedor A vs proveedor B).
  * Siempre devuelve { text, fromParts, templateId }.
  */
-async function extractRenameTextForType(file, type) {
+async function extractRenameTextForType(file, type, fullOcrText = '') {
     const tplIds = _getTypeTemplateIds(type);
     if (!tplIds.length) return { text: '', fromParts: false, templateId: null };
 
@@ -1118,29 +1695,29 @@ async function extractRenameTextForType(file, type) {
     if (tplIds.length === 1) {
         const tpl = tplMap[tplIds[0]];
         if (!tpl) return { text: '', fromParts: false, templateId: null };
-        const text = await _buildRenameText(getCanvas, tpl);
+        const text = await _buildRenameText(getCanvas, tpl, fullOcrText);
         return { text, fromParts: Array.isArray(tpl.renameParts) && tpl.renameParts.length > 0, templateId: tpl.id };
     }
 
-    // ── Varias plantillas: elegir la de mayor similitud en zona de identificación
+    // ── Varias plantillas: elegir por NOMBRE del proveedor (+ CIF único) ──────
+    const commonCifs = _buildCommonCifSet(allTemplates);
     let bestTpl = null, bestScore = -1;
 
     for (const tplId of tplIds) {
         const tpl = tplMap[tplId];
         if (!tpl) continue;
-        if (!tpl.identification?.rect) {
-            // Sin zona de identificación: candidato de reserva (score 0) si ninguno puntúa más
-            if (bestScore < 0) { bestTpl = tpl; bestScore = 0; }
-            continue;
+        let { score } = _templateMatchScore(tpl, fullOcrText, commonCifs);
+        // Respaldo: zona naranja si el texto no decidió
+        if (score < 0.6 && tpl.identification?.rect) {
+            const id    = await getCanvas(tpl.identification.page || 0);
+            const idTxt = await _ocrCrop(id.canvas, id.vp, tpl.identification.rect);
+            score = Math.max(score, _similarity(idTxt, tpl.identification.text));
         }
-        const id    = await getCanvas(tpl.identification.page || 0);
-        const idTxt = await _ocrCrop(id.canvas, id.vp, tpl.identification.rect);
-        const score = _similarity(idTxt, tpl.identification.text);
         if (score > bestScore) { bestScore = score; bestTpl = tpl; }
     }
 
     if (!bestTpl) return { text: '', fromParts: false, templateId: null };
-    const text = await _buildRenameText(getCanvas, bestTpl);
+    const text = await _buildRenameText(getCanvas, bestTpl, fullOcrText);
     return {
         text,
         fromParts:  Array.isArray(bestTpl.renameParts) && bestTpl.renameParts.length > 0,
@@ -1172,7 +1749,7 @@ async function processWithType(file, fileId, type, text, autoDetected, renameTex
         processedFiles.add(file.path);
         fileCounter++;
         updateFileCounter();
-        await saveToOCRIndex(result.newPath, newName, text, type.name);
+        await saveToOCRIndex(result.newPath, newName, text, type.name, templateId, file.name, autoDetected ? 'auto' : 'tipo');
         console.log(`✅ [${type.name}] ${newName}`);
 
         // 🧠 Aprendizaje ML
@@ -1286,21 +1863,91 @@ function setupManualRenameListeners() {
         await handleManualRenameConfirmed(data);
     });
     window.electronAPI.onManualRenameSkipped(() => handleManualRenameSkipped());
+    window.electronAPI.onManualTemplateCreated(async data => {
+        await handleManualTemplateCreated(data);
+    });
 }
 
-function queueForManualRename(file, fileId, detectedType, ocrText, suggestedType = null, suggestedFileName = null) {
+/**
+ * El usuario creó una plantilla (en el Motor OCR Zonal) para el documento que
+ * está en la cola de renombrado manual. Procesar ese documento con el tipo
+ * creado: extraer el nombre con la plantilla, mover, indexar, entrenar, y
+ * avanzar la cola (lo que cierra/reemplaza el modal de renombrado).
+ */
+async function handleManualTemplateCreated(data) {
+    const file   = currentManualFile;
+    const fileId = currentManualFileId;
+    const text   = currentManualOcrText;
+    if (!file) return;
+
+    try {
+        // Recargar tipos para incluir el recién creado
+        try { userDocTypes = await window.electronAPI.getDocTypes(); } catch (_) {}
+        renderUserTypeButtons();
+
+        const type = userDocTypes.find(t => t.id === parseInt(data?.typeId));
+        if (!type) {
+            // No se encontró el tipo → dejar el documento en la cola para revisión
+            updateFileStatus(fileId, '⚠️ Tipo no encontrado tras crear plantilla', 100, 'skipped');
+            currentManualFile = null; currentManualFileId = null;
+            processNextManualRename();
+            return;
+        }
+
+        updateFileStatus(fileId, `🎯 Aplicando plantilla de ${type.name}...`, 70);
+
+        const templateId = data?.templateId || null;
+
+        // Preferir el nombre EXACTO de la vista previa de la plantilla (lo que el
+        // usuario acaba de ver y validar). Solo si no viene, re-extraer con OCR.
+        if (data?.finalName && data.finalName.trim()) {
+            const renameText = data.finalName.replace(/\.pdf$/i, '').trim();
+            // fromParts=true → processWithType usa el nombre tal cual, sin anteponer el tipo
+            await processWithType(file, fileId, type, text, false, renameText, true, templateId);
+        } else {
+            let renameText = '', fromParts = false, tplId = templateId;
+            try {
+                const r = await extractRenameTextForType(file, type, text);
+                renameText = r.text || '';
+                fromParts  = r.fromParts || false;
+                tplId      = r.templateId || tplId;
+            } catch (_) {}
+            await processWithType(file, fileId, type, text, false, renameText, fromParts, tplId);
+        }
+        _mlStatsCache = null;
+    } catch (err) {
+        console.error('[ManualTemplate] Error:', err);
+        updateFileStatus(fileId, `❌ Error: ${err.message}`, 100, 'error');
+    }
+
+    // Avanzar la cola → muestra el siguiente o cierra el modal
+    currentManualFile = null; currentManualFileId = null;
+    processNextManualRename();
+}
+
+function queueForManualRename(file, fileId, detectedType, ocrText, suggestedType = null, suggestedFileName = null, suggestedTemplateId = null) {
     const label = suggestedFileName ? '💡 Confirmar sugerencia...' : '⏳ En cola de revisión...';
     updateFileStatus(fileId, label, 75);
-    manualRenameQueue.push({ file, fileId, detectedType, ocrText, suggestedType, suggestedFileName });
+    manualRenameQueue.push({ file, fileId, detectedType, ocrText, suggestedType, suggestedFileName, suggestedTemplateId });
     if (!currentManualFile) processNextManualRename();
 }
 
 async function processNextManualRename() {
-    if (!manualRenameQueue.length) { currentManualFile = null; return; }
-    const { file, fileId, detectedType, ocrText, suggestedType, suggestedFileName } = manualRenameQueue.shift();
+    if (!manualRenameQueue.length) {
+        currentManualFile = null; currentManualFileId = null;
+        // Cerrar el modal de renombrado si sigue abierto (p.ej. tras crear plantilla)
+        try { await window.electronAPI.closeManualRenameWindow(); } catch (_) {}
+        return;
+    }
+    const entry = manualRenameQueue.shift();
+    const { file, fileId, detectedType, ocrText, suggestedType, suggestedFileName, suggestedTemplateId } = entry;
     currentManualFile   = file;
     currentManualFileId = fileId;
+    currentManualOcrText = ocrText || '';
     currentManualFile._suggestedType = suggestedType;
+    // Estado de corrección desde historial
+    currentManualIsHistory  = !!entry.isHistoryCorrection;
+    currentManualHistoryPath = entry.historyOriginalPath || null;
 
     // Cargar plantillas OCR para que la ventana pueda mostrar el formulario dinámico
     let templates = [];
@@ -1312,10 +1959,12 @@ async function processNextManualRename() {
             filePath:          file.path,
             detectedType:      detectedType || '',
             ocrText:           ocrText || '',
-            currentMode:       'auto',
+            currentMode:       entry.isHistoryCorrection ? 'history' : 'auto',
             docTypes:          userDocTypes,
             templates,
             suggestedFileName: suggestedFileName || '',
+            suggestedTemplateId: suggestedTemplateId || null,
+            isHistoryCorrection: !!entry.isHistoryCorrection,
             queueCount:        manualRenameQueue.length + 1,
         });
     } catch (err) {
@@ -1333,12 +1982,19 @@ async function handleManualRenameConfirmed(data) {
     const fileId = currentManualFileId;
     if (!file) return;
 
+    const isHistory   = currentManualIsHistory;
+    const historyPath = currentManualHistoryPath;
+
     try {
         // Buscar carpeta destino: prioridad → tipo seleccionado → folder de la data
         let targetFolder = data.destinationFolder || '';
         if (data.selectedTypeId) {
             const t = userDocTypes.find(x => x.id === parseInt(data.selectedTypeId));
             if (t?.folder) targetFolder = t.folder;
+        }
+        // Corrección desde historial: el archivo ya está archivado; re-renombrar en su carpeta
+        if (isHistory && historyPath) {
+            targetFolder = historyPath.replace(/[\\/][^\\/]*$/, '');  // directorio actual
         }
         if (!targetFolder) {
             updateFileStatus(fileId, '⚠️ Sin carpeta destino — configúrala en Gestionar Tipos', 100, 'skipped');
@@ -1350,13 +2006,20 @@ async function handleManualRenameConfirmed(data) {
                 try { await window.electronAPI.mlTrain(ocrForML, typeForML); _mlStatsCache = null; } catch (_) {}
             }
         } else {
-            const result = await window.electronAPI.moveFile(file.path, targetFolder, data.newFileName, false);
+            // Si es corrección y el nombre no cambia, no mover (evita "(1)"); solo re-aprender
+            const sameName = isHistory && (data.newFileName === file.name);
+            const result = sameName
+                ? { success: true, newPath: file.path }
+                : await window.electronAPI.moveFile(file.path, targetFolder, data.newFileName, false);
             if (result.success) {
-                updateFileStatus(fileId, `✅ ${data.newFileName}`, 100, 'success');
+                updateFileStatus(fileId, `✅ ${data.newFileName}`, 100, isHistory ? 'success' : 'success');
                 processedFiles.add(file.path);
-                fileCounter++;
-                updateFileCounter();
-                await saveToOCRIndex(result.newPath, data.newFileName, data.ocrText || '', data.selectedType || 'manual');
+                if (!isHistory) { fileCounter++; updateFileCounter(); }
+                // En corrección: quitar la entrada antigua del índice si la ruta cambió
+                if (isHistory && result.newPath !== historyPath) {
+                    try { await window.electronAPI.removeOcrDocument(historyPath); } catch (_) {}
+                }
+                await saveToOCRIndex(result.newPath, data.newFileName, data.ocrText || '', data.selectedType || 'manual', data.templateId || null, file.name, isHistory ? 'corregido' : 'manual');
 
                 // 🧠 Aprendizaje ML
                 const ocrForML  = data.ocrText || '';
@@ -1398,6 +2061,34 @@ async function handleManualRenameConfirmed(data) {
                         ).catch(() => {});
                     }
                 }
+
+                // 🎯 Zonas redibujadas a mano por el usuario → posición exacta y fiable
+                if (data.templateId && Array.isArray(data.correctedRects) && data.correctedRects.length) {
+                    for (const c of data.correctedRects) {
+                        try {
+                            await window.electronAPI.recordPartPosition({
+                                templateId: data.templateId,
+                                partLabel:  c.partLabel,
+                                page:       c.page || 0,
+                                rect:       c.rect,
+                                source:     'user_drawn',
+                            });
+                            window.electronAPI.logToCmd(`🎓 APRENDIDO: para el campo "${c.partLabel}" usaré a partir de ahora la zona que marcaste. He borrado la posición equivocada anterior. No repetiré el fallo.`);
+                        } catch (_) {}
+                    }
+                }
+
+                // 🆔 Aprender el CIF/NIF del documento → esta plantilla
+                // Solo el que está junto a "CIF/NIF" (el del proveedor, no el del cliente)
+                if (data.templateId && (data.ocrText || '')) {
+                    const cifs = _extractCifNearKeyword(data.ocrText);
+                    for (const cif of cifs) {
+                        try {
+                            const r = await window.electronAPI.addTemplateCif({ templateId: data.templateId, cif });
+                            if (r?.learned) window.electronAPI.logToCmd(`🆔 APRENDIDO: el CIF/NIF "${r.cif}" pertenece a esta plantilla. La próxima vez la reconoceré por ese CIF aunque la zona naranja falle.`);
+                        } catch (_) {}
+                    }
+                }
             } else {
                 updateFileStatus(fileId, `❌ ${result.error}`, 100, 'error');
             }
@@ -1412,12 +2103,16 @@ async function handleManualRenameConfirmed(data) {
     renderUserTypeButtons();
 
     currentManualFile = null;
+    currentManualIsHistory = false;
+    currentManualHistoryPath = null;
     processNextManualRename();
 }
 
 function handleManualRenameSkipped() {
-    if (currentManualFileId) updateFileStatus(currentManualFileId, '↪️ Omitido', 100, 'skipped');
+    if (currentManualFileId && !currentManualIsHistory) updateFileStatus(currentManualFileId, '↪️ Omitido', 100, 'skipped');
     currentManualFile = null;
+    currentManualIsHistory = false;
+    currentManualHistoryPath = null;
     processNextManualRename();
 }
 
@@ -1442,7 +2137,8 @@ async function extractTextFromPDF(file) {
             canvas.width   = viewport.width;
             canvas.height  = viewport.height;
             await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
-            const { data } = await Tesseract.recognize(canvas.toDataURL('image/png'), 'spa');
+            const straight = _autoDeskew(canvas, file.name);   // enderezar antes de OCR
+            const { data } = await Tesseract.recognize(straight.toDataURL('image/png'), 'spa');
             combinedText  += data.text + '\n';
         } catch (pageErr) {
             console.warn(`[OCR] Error en página ${pageNum}:`, pageErr.message);
@@ -1470,9 +2166,85 @@ async function loadOCRIndex() {
     } catch (e) {}
 }
 
-async function saveToOCRIndex(filePath, fileName, text, docType) {
+// =================================================================================
+// HISTORIAL DE ARCHIVOS PROCESADOS (corregible)
+// =================================================================================
+
+function openHistoryModal() {
+    document.getElementById('history-overlay').style.display = 'flex';
+    loadHistoryList();
+}
+
+async function loadHistoryList() {
+    const list = document.getElementById('history-list');
+    list.innerHTML = '<div style="color:#999;text-align:center;padding:20px">Cargando…</div>';
+    let res;
+    try { res = await window.electronAPI.getRecentDocuments(15); } catch (_) { res = { results: [] }; }
+    const docs = res?.results || [];
+
+    if (!docs.length) {
+        list.innerHTML = '<div style="color:#999;text-align:center;padding:24px">Aún no hay archivos procesados.</div>';
+        return;
+    }
+
+    list.innerHTML = '';
+    docs.forEach(doc => {
+        const fecha = new Date(doc.timestamp).toLocaleString('es-ES', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' });
+        const modeIcon = doc.mode === 'auto' ? '🤖' : doc.mode === 'manual' ? '✍️' : '📂';
+        const item = document.createElement('div');
+        item.style.cssText = 'display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid #eee;border-radius:9px;background:#fafafa';
+        item.innerHTML = `
+            <span style="font-size:1.3rem">${modeIcon}</span>
+            <div style="flex:1;min-width:0">
+                <div style="font-weight:700;font-size:.88rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(doc.file_name)}</div>
+                <div style="font-size:.74rem;color:#888;margin-top:2px">${esc(doc.doc_type || '—')} · ${fecha}${doc.original_name ? ' · era: ' + esc(doc.original_name) : ''}</div>
+            </div>
+            <button class="hist-correct-btn" style="border:1.5px solid #f59e0b;background:#fffbeb;color:#b45309;border-radius:7px;padding:6px 12px;cursor:pointer;font-size:.8rem;font-weight:700;white-space:nowrap">✏️ Corregir</button>
+        `;
+        item.querySelector('.hist-correct-btn').addEventListener('click', () => correctFromHistory(doc));
+        list.appendChild(item);
+    });
+}
+
+function esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+/**
+ * Abre la ventana de renombrado para corregir un archivo ya procesado.
+ * El archivo está en su carpeta destino; al confirmar se re-renombra en su sitio.
+ */
+async function correctFromHistory(doc) {
+    document.getElementById('history-overlay').style.display = 'none';
+
+    // Comprobar que el archivo sigue existiendo
+    const file = { path: doc.file_path, name: doc.file_name };
+
+    // Resolver el tipo por nombre
+    try { userDocTypes = await window.electronAPI.getDocTypes(); } catch (_) {}
+    const type = userDocTypes.find(t => t.name?.toUpperCase() === (doc.doc_type || '').toUpperCase());
+
+    // Encolar como corrección (bypass de detección)
+    const fileId = `hist-${Date.now()}-${Math.random()}`;
+    file.fileId = fileId;
+
+    manualRenameQueue.push({
+        file, fileId,
+        detectedType:        type ? type.id : (doc.doc_type || ''),
+        ocrText:             doc.ocr_text || '',
+        suggestedType:       type || null,
+        suggestedFileName:   '',                       // mostrar formulario de edición directo
+        suggestedTemplateId: doc.template_id || null,
+        isHistoryCorrection: true,
+        historyOriginalPath: doc.file_path,
+    });
+    if (!currentManualFile) processNextManualRename();
+}
+
+async function saveToOCRIndex(filePath, fileName, text, docType, templateId = null, originalName = null, mode = null) {
     try {
-        await window.electronAPI.addOcrDocument({ filePath, fileName, ocrText: text || '', docType: docType || '' });
+        await window.electronAPI.addOcrDocument({
+            filePath, fileName, ocrText: text || '', docType: docType || '',
+            templateId, originalName, mode,
+        });
     } catch (e) {
         console.warn('[OCRIndex] Error al guardar en base de datos:', e.message);
     }

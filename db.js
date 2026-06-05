@@ -268,6 +268,24 @@ class ZiloDatabase {
             console.log('[DB] Migración ocr_template_ids completada:', rows.length, 'tipos migrados');
         }
 
+        // ── ocr_templates: CIFs aprendidos de confirmaciones del usuario ───────
+        const otCols = this.db.prepare("PRAGMA table_info(ocr_templates)").all();
+        if (!otCols.some(c => c.name === 'known_cifs')) {
+            this.db.exec("ALTER TABLE ocr_templates ADD COLUMN known_cifs TEXT NOT NULL DEFAULT '[]'");
+        }
+
+        // ── ocr_documents: columnas para historial corregible ──────────────────
+        const odCols = this.db.prepare("PRAGMA table_info(ocr_documents)").all();
+        if (!odCols.some(c => c.name === 'template_id')) {
+            this.db.exec("ALTER TABLE ocr_documents ADD COLUMN template_id TEXT");
+        }
+        if (!odCols.some(c => c.name === 'original_name')) {
+            this.db.exec("ALTER TABLE ocr_documents ADD COLUMN original_name TEXT");
+        }
+        if (!odCols.some(c => c.name === 'mode')) {
+            this.db.exec("ALTER TABLE ocr_documents ADD COLUMN mode TEXT");
+        }
+
         // ── Auto-migración desde JSON en primer arranque ───────────────────────
         this._migrateJsonIfNeeded();
 
@@ -401,20 +419,56 @@ class ZiloDatabase {
      * @param {string} docType - Tipo de documento
      * @returns {object} - Resultado de la operación
      */
-    addOcrDocument(filePath, fileName, ocrText, docType) {
+    addOcrDocument(filePath, fileName, ocrText, docType, templateId = null, originalName = null, mode = null) {
         try {
             const stmt = this.db.prepare(`
-                INSERT OR REPLACE INTO ocr_documents (file_path, file_name, doc_type, ocr_text, timestamp)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO ocr_documents (file_path, file_name, doc_type, ocr_text, timestamp, template_id, original_name, mode)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             `);
 
             const timestamp = new Date().toISOString();
-            stmt.run(filePath, fileName, docType, ocrText, timestamp);
+            stmt.run(filePath, fileName, docType, ocrText, timestamp, templateId, originalName, mode);
 
             console.log(`[DB] Documento aniadido al indice: ${fileName}`);
             return { success: true };
         } catch (error) {
             console.error('[DB ERROR] Error al aniadir documento:', error);
+            return { success: false, error: error.message };
+        }
+    }
+
+    /**
+     * Devuelve los últimos N documentos procesados (para el historial corregible).
+     */
+    getRecentDocuments(limit = 15) {
+        try {
+            const rows = this.db.prepare(`
+                SELECT file_path, file_name, doc_type, ocr_text, timestamp, template_id, original_name, mode
+                FROM ocr_documents
+                ORDER BY timestamp DESC
+                LIMIT ?
+            `).all(limit);
+            return { success: true, results: rows };
+        } catch (error) {
+            console.error('[DB ERROR] getRecentDocuments:', error);
+            return { success: false, error: error.message, results: [] };
+        }
+    }
+
+    /**
+     * Borra las posiciones APRENDIDAS AUTOMÁTICAMENTE (no las del usuario) de una
+     * parte concreta. Se usa cuando el usuario corrige: así Zilo "olvida" dónde
+     * leía mal y deja de repetir el error.
+     */
+    clearAutoPositions(templateId, partLabel, page) {
+        try {
+            const r = this.db.prepare(`
+                DELETE FROM ocr_position_history
+                WHERE template_id=? AND part_label=? AND page=?
+                  AND source NOT IN ('user_drawn','text_layer_manual')
+            `).run(templateId, partLabel, page);
+            return { success: true, deleted: r.changes };
+        } catch (error) {
             return { success: false, error: error.message };
         }
     }
@@ -886,8 +940,34 @@ class ZiloDatabase {
             identification: JSON.parse(r.identification || '{}'),
             renameParts:    JSON.parse(r.rename_parts   || '[]'),
             confirmations:  r.confirmations,
+            knownCifs:      (() => { try { return JSON.parse(r.known_cifs || '[]'); } catch { return []; } })(),
             createdAt:      r.created_at,
         }));
+    }
+
+    /**
+     * Aprende que un CIF/NIF pertenece a esta plantilla (desde una confirmación
+     * del usuario). Así, aunque la captura inicial del CIF fuera mala, Zilo
+     * acumula los CIF reales de los documentos que el usuario asigna.
+     */
+    addTemplateCif(templateId, cif) {
+        try {
+            const clean = (cif || '').replace(/[^0-9A-Za-z]/g, '').toUpperCase();
+            if (clean.replace(/[^0-9]/g, '').length < 7) return { success: false };
+            const row = this.db.prepare('SELECT known_cifs FROM ocr_templates WHERE id=?').get(templateId);
+            if (!row) return { success: false };
+            let list = [];
+            try { list = JSON.parse(row.known_cifs || '[]'); } catch (_) { list = []; }
+            if (!list.includes(clean)) {
+                list.push(clean);
+                if (list.length > 30) list = list.slice(-30);
+                this.db.prepare('UPDATE ocr_templates SET known_cifs=? WHERE id=?').run(JSON.stringify(list), templateId);
+                return { success: true, learned: true, cif: clean };
+            }
+            return { success: true, learned: false };
+        } catch (e) {
+            return { success: false, error: e.message };
+        }
     }
 
     saveTemplate(data) {
@@ -1159,6 +1239,12 @@ class ZiloDatabase {
         if (!templateId || !partLabel || !rect) return { success: false };
         const MAX_POS_HISTORY = 50;
 
+        // Si es una corrección del usuario, OLVIDAR las posiciones automáticas
+        // erróneas: así Zilo entiende que lo hacía mal y deja de repetir el fallo.
+        if (source === 'user_drawn' || source === 'text_layer_manual') {
+            this.clearAutoPositions(templateId, partLabel, page);
+        }
+
         // Mantener solo las últimas MAX_POS_HISTORY por (template, part, page)
         const n = this.db.prepare(
             `SELECT COUNT(*) as n FROM ocr_position_history
@@ -1200,36 +1286,54 @@ class ZiloDatabase {
      * @returns {{ x, y, w, h, confidence, spreadX, spreadY } | null}
      */
     getAdaptiveZone(templateId, partLabel, page, originalRect) {
-        const MIN_HISTORY = 3;
-
-        const history = this.db.prepare(
+        const allHistory = this.db.prepare(
             `SELECT norm_x, norm_y, norm_w, norm_h, source
              FROM ocr_position_history
              WHERE template_id=? AND part_label=? AND page=?
              ORDER BY confirmed_at DESC LIMIT 25`
         ).all(templateId, partLabel, page);
 
+        if (!allHistory.length) return null;
+
+        // ── Las correcciones explícitas del usuario son "verdad absoluta" ──────
+        // Si existen, la zona se calcula SOLO con ellas (no se diluyen con las
+        // lecturas automáticas, que pueden venir de la zona equivocada).
+        const USER_SOURCES = new Set(['user_drawn', 'text_layer_manual']);
+        const userHistory  = allHistory.filter(h => USER_SOURCES.has(h.source));
+
+        const userConfirmed = userHistory.length > 0;
+        const history       = userConfirmed ? userHistory : allHistory;
+        const MIN_HISTORY   = userConfirmed ? 1 : 3;   // 1 corrección del usuario ya cuenta
+
         if (history.length < MIN_HISTORY) return null;
 
         const n       = history.length;
-        const decay   = 0.12;   // decaimiento exponencial por posición en el historial
+        const decay   = 0.12;
         const weights = history.map((_, i) => Math.exp(-i * decay));
         const wSum    = weights.reduce((a, b) => a + b, 0);
 
-        // Media ponderada de centros (cx, cy)
         const cx = history.map(h => h.norm_x + h.norm_w / 2);
         const cy = history.map(h => h.norm_y + h.norm_h / 2);
         const wcx = cx.reduce((s, v, i) => s + weights[i] * v, 0) / wSum;
         const wcy = cy.reduce((s, v, i) => s + weights[i] * v, 0) / wSum;
 
-        // Desviación típica ponderada → medida de "cuánto varía la posición"
         const sx = Math.sqrt(cx.reduce((s, v, i) => s + weights[i] * (v - wcx) ** 2, 0) / wSum);
         const sy = Math.sqrt(cy.reduce((s, v, i) => s + weights[i] * (v - wcy) ** 2, 0) / wSum);
 
-        // Padding: al menos la mitad de la zona original, ampliado por la dispersión
-        const or = originalRect || {};
-        const padX = Math.max((or.w || 0.05) / 2 + 0.01,  1.5 * sx + 0.01);
-        const padY = Math.max((or.h || 0.02) / 2 + 0.005, 1.5 * sy + 0.005);
+        // Para correcciones del usuario, usar el ancho/alto medio que dibujó
+        // (más fiable que la zona original). Para auto, padding según dispersión.
+        const avgW = history.reduce((s, h) => s + h.norm_w, 0) / n;
+        const avgH = history.reduce((s, h) => s + h.norm_h, 0) / n;
+        const or   = originalRect || {};
+
+        let padX, padY;
+        if (userConfirmed) {
+            padX = Math.max(avgW / 2, 1.2 * sx) + 0.008;
+            padY = Math.max(avgH / 2, 1.2 * sy) + 0.005;
+        } else {
+            padX = Math.max((or.w || 0.05) / 2 + 0.01,  1.5 * sx + 0.01);
+            padY = Math.max((or.h || 0.02) / 2 + 0.005, 1.5 * sy + 0.005);
+        }
 
         const ax = Math.max(0,     wcx - padX);
         const ay = Math.max(0,     wcy - padY);
@@ -1238,7 +1342,8 @@ class ZiloDatabase {
 
         return {
             x: ax, y: ay, w: aw, h: ah,
-            confidence: n,
+            confidence:    n,
+            userConfirmed,                       // true = corrección explícita del usuario
             spreadX:    Math.round(sx * 1000) / 1000,
             spreadY:    Math.round(sy * 1000) / 1000,
             centerX:    Math.round(wcx * 1000) / 1000,
