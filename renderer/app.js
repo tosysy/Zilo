@@ -68,7 +68,9 @@ function _invalidatePatternCache(typeName) {
  */
 async function _isExpertForType(typeName) {
     const stats    = await _getMlStats();
-    const key      = Object.keys(stats?.classes || {}).find(k => k.toLowerCase() === typeName.toLowerCase());
+    // Normalizar nombre antes de comparar — evita que "Factura" y "FACTURA" sean clases distintas
+    const normName = typeName.trim().toUpperCase();
+    const key      = Object.keys(stats?.classes || {}).find(k => k.trim().toUpperCase() === normName);
     const docCount = key ? (stats.classes[key].docCount || 0) : 0;
 
     if (docCount >= 20) return true;
@@ -563,13 +565,22 @@ async function _ocrCrop(canvas, vp, normRect) {
     return data.text.replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-/** Similitud de texto por palabras en común. */
+/** Normaliza texto para comparación robusta: sin acentos, sin puntuación, minúsculas. */
+function _normalizeText(t) {
+    return (t || '').toLowerCase()
+        .normalize('NFD').replace(/[̀-ͯ]/g, '')  // eliminar diacríticos
+        .replace(/[^a-z0-9\s]/g, ' ')            // quitar puntuación
+        .replace(/\s+/g, ' ').trim();
+}
+
+/** Similitud de texto por palabras en común (normalizada). */
 function _similarity(extracted, saved) {
     if (!extracted || !saved) return 0;
-    const words = saved.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+    const normSaved = _normalizeText(saved);
+    const normExt   = _normalizeText(extracted);
+    const words = normSaved.split(/\s+/).filter(w => w.length > 2);
     if (!words.length) return 0;
-    const ext = extracted.toLowerCase();
-    return words.filter(w => ext.includes(w)).length / words.length;
+    return words.filter(w => normExt.includes(w)).length / words.length;
 }
 
 /**
@@ -1106,8 +1117,14 @@ async function handleManualRenameConfirmed(data) {
             if (t?.folder) targetFolder = t.folder;
         }
         if (!targetFolder) {
-            updateFileStatus(fileId, '⚠️ Sin carpeta destino', 100, 'skipped');
+            updateFileStatus(fileId, '⚠️ Sin carpeta destino — configúrala en Gestionar Tipos', 100, 'skipped');
             processedFiles.add(file.path);
+            // Entrenar ML aunque no haya carpeta — el usuario confirmó el tipo, ese dato es valioso
+            const ocrForML  = data.ocrText    || '';
+            const typeForML = data.selectedType || '';
+            if (ocrForML && typeForML) {
+                try { await window.electronAPI.mlTrain(ocrForML, typeForML); _mlStatsCache = null; } catch (_) {}
+            }
         } else {
             const result = await window.electronAPI.moveFile(file.path, targetFolder, data.newFileName, false);
             if (result.success) {
@@ -1177,14 +1194,25 @@ async function extractTextFromPDF(file) {
     let   combinedText = '';
 
     for (let pageNum = 1; pageNum <= pagesToProc; pageNum++) {
-        const page     = await pdf.getPage(pageNum);
-        const viewport = page.getViewport({ scale: 3.0 });
-        const canvas   = document.createElement('canvas');
-        canvas.width   = viewport.width;
-        canvas.height  = viewport.height;
-        await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
-        const { data } = await Tesseract.recognize(canvas.toDataURL('image/png'), 'spa');
-        combinedText  += data.text + '\n';
+        try {
+            const page     = await pdf.getPage(pageNum);
+            const viewport = page.getViewport({ scale: 3.0 });
+            const canvas   = document.createElement('canvas');
+            canvas.width   = viewport.width;
+            canvas.height  = viewport.height;
+            await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+            const { data } = await Tesseract.recognize(canvas.toDataURL('image/png'), 'spa');
+            combinedText  += data.text + '\n';
+        } catch (pageErr) {
+            console.warn(`[OCR] Error en página ${pageNum}:`, pageErr.message);
+            // Continuar con las demás páginas
+        }
+    }
+
+    // Validar que se extrajo algo útil
+    const meaningful = combinedText.replace(/\s+/g, '').length;
+    if (meaningful < 10) {
+        console.warn(`[OCR] Texto extraído insuficiente (${meaningful} chars) en "${file.name}" — PDF escaneado sin capa de texto?`);
     }
 
     return combinedText;

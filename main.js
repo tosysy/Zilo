@@ -470,11 +470,21 @@ async function moveFileCrossDevice(source, destination) {
     return destination;
   } catch (error) {
     if (error.code === 'EXDEV') {
-      // Error cross-device: copiar y eliminar
-      console.log('[WARNING] Cross-device detectado, usando copy + delete');
+      // Error cross-device: copiar, VERIFICAR tamaño, luego borrar el original
+      console.log('[WARNING] Cross-device detectado, usando copy + verify + delete');
       await fs.copyFile(source, destination);
+
+      const [srcStat, dstStat] = await Promise.all([fs.stat(source), fs.stat(destination)]);
+      if (dstStat.size !== srcStat.size) {
+        await fs.unlink(destination).catch(() => {});
+        throw new Error(
+          `Copia incompleta: ${srcStat.size} bytes origen vs ${dstStat.size} bytes destino. ` +
+          `El archivo original NO se ha modificado.`
+        );
+      }
+
       await fs.unlink(source);
-      console.log('[SUCCESS] Archivo movido con copy + delete (diferentes discos)');
+      console.log('[SUCCESS] Archivo movido con copy + verify + delete (diferentes discos)');
       return destination;
     } else {
       throw error;
@@ -513,9 +523,12 @@ ipcMain.handle('move-file', async (event, originalPath, destFolder, newName, cre
       finalDestFolder = subfolderPath;
     }
     
+    // Crear la carpeta destino si no existe (evita fallo silencioso si se borró)
+    await fs.mkdir(finalDestFolder, { recursive: true });
+
     const newPath = path.join(finalDestFolder, newName);
     console.log('  - Ruta final:', newPath);
-    
+
     // Verificar si el archivo destino ya existe
     try {
       await fs.access(newPath);
@@ -1167,7 +1180,8 @@ ipcMain.handle('ocr-promote-pending-pattern', async (event, id) => {
 
 // ── Motor ML ──────────────────────────────────────────────────────────────────
 ipcMain.handle('ml-train', async (event, { text, className }) => {
-  return mlEngine.train(text, className);
+  // Normalizar nombre del tipo a mayúsculas para que _isExpertForType lo encuentre siempre
+  return mlEngine.train(text, (className || '').trim().toUpperCase());
 });
 
 ipcMain.handle('ml-classify', async (event, text) => {
