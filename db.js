@@ -1295,22 +1295,28 @@ class ZiloDatabase {
 
         if (!allHistory.length) return null;
 
-        // ── Las correcciones explícitas del usuario son "verdad absoluta" ──────
-        // Si existen, la zona se calcula SOLO con ellas (no se diluyen con las
-        // lecturas automáticas, que pueden venir de la zona equivocada).
-        const USER_SOURCES = new Set(['user_drawn', 'text_layer_manual']);
-        const userHistory  = allHistory.filter(h => USER_SOURCES.has(h.source));
+        // ── MEDIA PONDERADA de TODAS las posiciones ────────────────────────────
+        // Las correcciones del usuario pesan mucho (PESO_USUARIO), las lecturas
+        // automáticas afinan poco a poco. Así la zona converge a la posición real
+        // sin que un único punto la reemplace de golpe ni que las lecturas malas
+        // la arruinen. (Las posiciones automáticas erróneas previas ya se han
+        // borrado al corregir, así que aquí solo quedan datos buenos.)
+        const USER_SOURCES   = new Set(['user_drawn', 'text_layer_manual']);
+        const PESO_USUARIO   = 25;   // una corrección tuya pesa como 25 lecturas auto
+        const userConfirmed  = allHistory.some(h => USER_SOURCES.has(h.source));
+        const MIN_HISTORY    = userConfirmed ? 1 : 3;
 
-        const userConfirmed = userHistory.length > 0;
-        const history       = userConfirmed ? userHistory : allHistory;
-        const MIN_HISTORY   = userConfirmed ? 1 : 3;   // 1 corrección del usuario ya cuenta
+        if (allHistory.length < MIN_HISTORY) return null;
 
-        if (history.length < MIN_HISTORY) return null;
-
+        const history = allHistory;
         const n       = history.length;
-        const decay   = 0.12;
-        const weights = history.map((_, i) => Math.exp(-i * decay));
-        const wSum    = weights.reduce((a, b) => a + b, 0);
+        const decay   = 0.10;   // decaimiento por antigüedad
+        const weights = history.map((h, i) => {
+            const recency = Math.exp(-i * decay);
+            const src     = USER_SOURCES.has(h.source) ? PESO_USUARIO : 1;
+            return recency * src;
+        });
+        const wSum = weights.reduce((a, b) => a + b, 0);
 
         const cx = history.map(h => h.norm_x + h.norm_w / 2);
         const cy = history.map(h => h.norm_y + h.norm_h / 2);
@@ -1320,10 +1326,9 @@ class ZiloDatabase {
         const sx = Math.sqrt(cx.reduce((s, v, i) => s + weights[i] * (v - wcx) ** 2, 0) / wSum);
         const sy = Math.sqrt(cy.reduce((s, v, i) => s + weights[i] * (v - wcy) ** 2, 0) / wSum);
 
-        // Para correcciones del usuario, usar el ancho/alto medio que dibujó
-        // (más fiable que la zona original). Para auto, padding según dispersión.
-        const avgW = history.reduce((s, h) => s + h.norm_w, 0) / n;
-        const avgH = history.reduce((s, h) => s + h.norm_h, 0) / n;
+        // Tamaño de la zona: media ponderada del ancho/alto observados
+        const avgW = history.reduce((s, h, i) => s + weights[i] * h.norm_w, 0) / wSum;
+        const avgH = history.reduce((s, h, i) => s + weights[i] * h.norm_h, 0) / wSum;
         const or   = originalRect || {};
 
         let padX, padY;
