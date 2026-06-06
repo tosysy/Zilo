@@ -452,12 +452,14 @@ async function processFile(file, fileId) {
         // ── Modo tipo directo ──────────────────────────────────────────────────
         if (currentMode === 'type' && currentDocType) {
             let renameText = '', fromParts = false, tplId = null;
+            let dirOffset = null;
             if (_getTypeTemplateIds(currentDocType).length) {
                 updateFileStatus(fileId, 'Extrayendo nombre...', 55);
                 const r = await extractRenameTextForType(file, currentDocType, text);
                 renameText = r.text || '';
                 fromParts  = r.fromParts || false;
                 tplId      = r.templateId || null;
+                dirOffset  = r.zoneOffset || null;
             }
             // Fallback: patrones aprendidos si no hay template OCR configurado
             if (!renameText && text) {
@@ -470,7 +472,7 @@ async function processFile(file, fileId) {
             } else {
                 const suggested = generateAdaptiveName(file.name, currentDocType, renameText, fromParts);
                 updateFileStatus(fileId, `💡 Confirmar: ${suggested}`, 70);
-                queueForManualRename(file, fileId, currentDocType.name, text, currentDocType, suggested, tplId);
+                queueForManualRename(file, fileId, currentDocType.name, text, currentDocType, suggested, tplId, dirOffset);
             }
             return;
         }
@@ -489,14 +491,14 @@ async function processFile(file, fileId) {
                 } else {
                     const suggested = generateAdaptiveName(file.name, matched.type, matched.renameText, matched.fromParts);
                     updateFileStatus(fileId, `💡 ${matched.type.name} — confirmar...`, 70);
-                    queueForManualRename(file, fileId, matched.type.name, text, matched.type, suggested, matched.templateId);
+                    queueForManualRename(file, fileId, matched.type.name, text, matched.type, suggested, matched.templateId, matched.zoneOffset);
                 }
             } else if (matched && matched.confianza === 'medium') {
                 const suggested = matched.renameText
                     ? generateAdaptiveName(file.name, matched.type, matched.renameText, matched.fromParts)
                     : null;
                 updateFileStatus(fileId, `🟡 Posible: ${matched.type.name} — confirmar...`, 70);
-                queueForManualRename(file, fileId, matched.type.name, text, matched.type, suggested, matched.templateId);
+                queueForManualRename(file, fileId, matched.type.name, text, matched.type, suggested, matched.templateId, matched.zoneOffset);
             } else {
                 updateFileStatus(fileId, '⚠️ Tipo no detectado → revisión manual', 70);
                 queueForManualRename(file, fileId, null, text);
@@ -736,6 +738,19 @@ async function _ocrCropSmart(canvas, vp, normRect, opts = {}) {
     return (data.text || '').replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+/**
+ * Clave ESTABLE de una parte OCR. Debe ser idéntica al grabar una corrección y al
+ * leer la zona aprendida; si no, las correcciones se guardan con una clave y se
+ * leen con otra (bug histórico "undefined" vs "part") y nunca se aplican.
+ * Las plantillas garantizan `part.id` (db.js asigna ids a las antiguas).
+ */
+function partKey(part) {
+    if (!part) return 'part';
+    if (part.id != null && part.id !== '') return String(part.id);
+    if (part.label) return String(part.label);
+    return 'part';
+}
+
 /** ¿La parte busca un valor numérico? (para activar OCR de solo dígitos) */
 function _partIsNumeric(part) {
     if (!part) return false;
@@ -829,7 +844,7 @@ function _recordPositionAsync(templateId, part, pg, usedRect, foundText, source)
 
             await window.electronAPI.recordPartPosition({
                 templateId,
-                partLabel: part.label || part.id || 'part',
+                partLabel: partKey(part),
                 page:      part.page  || 0,
                 rect,
                 source:    finalSource,
@@ -861,6 +876,17 @@ function _recordPositionAsync(templateId, part, pg, usedRect, foundText, source)
  */
 function _scoreCandidate(txt, numeric) {
     if (!txt || !txt.trim()) return -1;
+
+    // Rechazar BASURA de OCR: cadenas dominadas por símbolos raros (=.·.¡—Í.'='·)
+    // no son ni un número ni un dato válido → puntuación negativa para descartarlas.
+    const noSpace = txt.replace(/\s/g, '');
+    if (noSpace.length) {
+        const alnum  = (noSpace.match(/[a-zA-Z0-9]/g) || []).length;
+        const symbol = noSpace.length - alnum;
+        if (alnum === 0) return -1;
+        if (symbol / noSpace.length > 0.4) return -1;   // más de 40% símbolos = ruido
+    }
+
     const t = _normalizeText(txt);
     const labels = ['albaran','numero','num','fecha','codigo','cliente','pedido',
                     'referencia','descripcion','pagina','copia','cantidad','precio',
@@ -915,7 +941,7 @@ async function _localZoneSearch(pg, rect, numeric) {
 
 async function _ocrCropWithLearning(pg, rect, tpl, part) {
     const templateId = tpl?.id;
-    const partLabel  = part.label || part.id || 'part';
+    const partLabel  = partKey(part);
     const page       = part.page  || 0;
     const numeric    = _partIsNumeric(part);   // OCR de solo dígitos si es un número
 
@@ -1068,8 +1094,8 @@ async function _recordPositionsFromConfirmedValues(filePath, templateId, parts, 
 
         for (const part of parts) {
             if (part.type !== 'ocr') continue;
-            const label = part.label || part.id || 'part';
-            const value = confirmedValues[label] || confirmedValues[part.id] || '';
+            const label = partKey(part);
+            const value = confirmedValues[label] || confirmedValues[part.id] || confirmedValues[part.label] || '';
             if (!value?.trim() || value.trim().length < 3) continue;
 
             try {
@@ -1331,6 +1357,27 @@ async function _findIdZoneOffset(pg, idRect, expectedDigitsList) {
     return { ...best, confident: best.score >= 0.85 };
 }
 
+/**
+ * Calcula el desplazamiento de alineación (offset global) de una plantilla usando
+ * el dato único de su zona de identificación (teléfono/CIF). Devuelve {dx,dy} en
+ * coordenadas normalizadas. Compartido por la detección automática y el modo tipo
+ * directo para que la sugerencia muestre los recuadros desplazados igual.
+ */
+async function _computeAlignOffset(getCanvas, tpl, commonCifs = null, matchedDigit = null) {
+    const off0 = { dx: 0, dy: 0 };
+    if (!tpl?.identification?.rect) return off0;
+    const { digitRuns } = _zoneContentTokens(tpl);
+    const alignDigits = [...new Set([matchedDigit, ...digitRuns]
+        .filter(d => d && d.length >= 7 && !(commonCifs && commonCifs.has(d))))];
+    if (!alignDigits.length) return off0;
+    try {
+        const pgId = await getCanvas(tpl.identification.page || 0);
+        const reg  = await _findIdZoneOffset(pgId, tpl.identification.rect, alignDigits);
+        if (reg.confident) return { dx: reg.dx, dy: reg.dy };
+    } catch (_) {}
+    return off0;
+}
+
 async function _buildRenameText(getCanvas, tpl, fullOcrText = '') {
     // Nuevo formato: array de partes
     if (Array.isArray(tpl.renameParts) && tpl.renameParts.length) {
@@ -1445,13 +1492,14 @@ async function detectDocumentType(file, ocrText) {
 
     // ── Alta confianza ML (≥0.80) + suficientes ejemplos ─────────────────────
     if (mlType && mlResult.confidence >= 0.80 && mlResult.docCount >= 5) {
-        let renameText = '', fromParts = false, templateId = null;
+        let renameText = '', fromParts = false, templateId = null, zoneOffset = null;
         if (_getTypeTemplateIds(mlType).length) {
             try {
                 const r  = await extractRenameTextForType(file, mlType, ocrText);
                 renameText = r.text || '';
                 fromParts  = r.fromParts || false;
                 templateId = r.templateId || null;
+                zoneOffset = r.zoneOffset || null;
             } catch (_) {}
         }
         // Fallback: patrones aprendidos de ejemplos manuales
@@ -1459,7 +1507,7 @@ async function detectDocumentType(file, ocrText) {
             renameText = await _extractByLearnedPattern(ocrText, mlType.name);
         }
         return {
-            type: mlType, renameText, fromParts, templateId,
+            type: mlType, renameText, fromParts, templateId, zoneOffset,
             confianza: 'high', source: 'ml',
             mlConfidence: mlResult.confidence,
         };
@@ -1508,39 +1556,59 @@ function _buildCommonCifSet(allTemplates) {
     return common;
 }
 
+const _GENERIC_WORDS = new Set(['albaran','factura','pedido','entrada','dua','documento','copia','original','herramientas','industriales','telefono','email','correo','direccion','poligono','calle','avenida']);
+
 /**
- * Puntúa cuánto encaja una plantilla con un documento, priorizando el NOMBRE
- * del proveedor (membrete) en el texto completo, que es el discriminador real.
- * El CIF solo cuenta si es ÚNICO de esa plantilla (no compartido).
+ * Extrae la "huella de identificación" de una plantilla: lo que el usuario marcó
+ * en la zona de identificación (tpl.identification.text) más los CIF aprendidos.
+ *  - words:     palabras distintivas (≥4, no genéricas, no solo dígitos)
+ *  - digitRuns: secuencias largas de dígitos (teléfono, CIF, código) — muy únicas
+ */
+function _zoneContentTokens(tpl) {
+    const idText = tpl.identification?.text || '';
+    const words = [...new Set(
+        _normalizeText(idText).split(/\s+/)
+            .filter(w => w.length >= 4 && !/^\d+$/.test(w) && !_GENERIC_WORDS.has(w))
+    )];
+    const fromText = (idText.match(/\d[\d\s.\-]{4,}\d/g) || [])
+        .map(s => s.replace(/\D/g, '')).filter(d => d.length >= 6);
+    const fromCifs = (tpl.knownCifs || []).map(_cifDigits).filter(d => d.length >= 7);
+    const digitRuns = [...new Set([...fromText, ...fromCifs])];
+    return { words, digitRuns };
+}
+
+/**
+ * Puntúa cuánto encaja una plantilla con un documento. DECISIVO: el CONTENIDO de la
+ * zona de identificación que marcó el usuario (teléfono/CIF/texto único) debe
+ * aparecer en el documento. El nombre del proveedor solo suma un pequeño apoyo y
+ * NUNCA clasifica por sí solo (decisión del usuario: la zona es obligatoria).
  */
 function _templateMatchScore(tpl, fullOcrText, commonCifs) {
-    const text = _normalizeText(fullOcrText || '');
-
-    // 1. Palabras del proveedor: del membrete/identificación Y del nombre de la
-    //    plantilla (ej: "SANVICOR ALBARAN" → "sanvicor"). Robusto aunque la zona
-    //    naranja haya capturado el CIF en vez del nombre.
-    const genericWords = new Set(['albaran','factura','pedido','entrada','dua','documento','copia','original','herramientas','industriales']);
-    const idWords = [
-        ..._normalizeText(tpl.identification?.text || '').split(/\s+/),
-        ..._normalizeText(tpl.nombre || '').split(/\s+/),
-    ].filter(w => w.length >= 4 && !/^\d+$/.test(w) && !genericWords.has(w));
-    const uniqWords = [...new Set(idWords)];
-    const nameScore = uniqWords.length
-        ? uniqWords.filter(w => text.includes(w)).length / uniqWords.length
-        : 0;
-
-    // 2. CIF ÚNICO (no compartido) que aparece en el documento
-    const cifs = [..._extractCifCandidates(tpl.identification?.text || ''), ...(tpl.knownCifs || [])]
-        .map(_cifDigits).filter(d => d.length >= 7 && !commonCifs.has(d));
+    const text      = _normalizeText(fullOcrText || '');
     const docDigits = _cifDigits(fullOcrText);
-    const cifMatch = cifs.some(c => docDigits.includes(c) || _digitsFuzzyIncluded(c, docDigits, 1));
 
-    // El NOMBRE manda. El CIF solo refuerza FUERTE si el nombre también encaja
-    // (si coincide el CIF pero el nombre no, ese CIF es sospechoso: NIF compartido).
-    let score = nameScore;
-    if (cifMatch && nameScore >= 0.25) score = Math.max(score, 0.9);
-    else if (cifMatch)                 score = Math.max(score, nameScore + 0.1);
-    return { score, nameScore, cifMatch };
+    const { words, digitRuns } = _zoneContentTokens(tpl);
+    const distinctiveDigits = digitRuns.filter(d => !commonCifs.has(d));
+    const matchedDigit = distinctiveDigits.find(d => docDigits.includes(d) || _digitsFuzzyIncluded(d, docDigits, 1));
+    const digitHit  = !!matchedDigit;
+
+    const wordFrac = words.length ? words.filter(w => text.includes(w)).length / words.length : 0;
+    const hasZoneTokens = (words.length + distinctiveDigits.length) > 0;
+
+    // Señal PRINCIPAL = la zona. Un teléfono/CIF único presente ≈ identificación segura.
+    let zoneScore = digitHit ? 0.95 : wordFrac;
+
+    // APOYO secundario: nombre de la plantilla (membrete) presente en el texto.
+    // Solo suma si la zona ya tiene algo de presencia; nunca clasifica solo.
+    const nameWords = [...new Set(
+        _normalizeText(tpl.nombre || '').split(/\s+/)
+            .filter(w => w.length >= 4 && !/^\d+$/.test(w) && !_GENERIC_WORDS.has(w))
+    )];
+    const nameFrac  = nameWords.length ? nameWords.filter(w => text.includes(w)).length / nameWords.length : 0;
+    const nameBonus = (zoneScore >= 0.3 && nameFrac >= 0.5) ? 0.15 : 0;
+
+    const score = hasZoneTokens ? Math.min(1, zoneScore + nameBonus) : 0;
+    return { score, zoneScore, nameFrac, digitHit, matchedDigit, hasZoneTokens };
 }
 
 /**
@@ -1569,7 +1637,7 @@ async function detectTypeByOcrZonal(file, mlHint = null, fullOcrText = '') {
 
     window.electronAPI.logToCmd(`🎯 Analizando "${file.name}" — identifico al proveedor por el CONTENIDO de su zona de identificación (nombre/web/CIF)...`);
 
-    const IDENT_MIN = 0.5;   // umbral mínimo para dar por identificado al proveedor
+    const IDENT_MIN = 0.6;   // umbral mínimo para dar por identificado al proveedor
     let best = null, bestScore = 0;
 
     for (const type of typesWithTemplate) {
@@ -1579,25 +1647,28 @@ async function detectTypeByOcrZonal(file, mlHint = null, fullOcrText = '') {
             const hasRename = (Array.isArray(tpl.renameParts) && tpl.renameParts.length) || tpl.rename?.rect;
             if (!hasRename || !tpl.identification?.rect) continue;
 
-            // Identificación por CONTENIDO: nombre/web del membrete + nombre plantilla
-            // + CIF único. Lo que el usuario haya capturado en la zona naranja sirve.
+            // Identificación por el CONTENIDO de la zona que marcó el usuario
+            // (teléfono/CIF/texto único). El nombre solo es apoyo secundario.
             const m = _templateMatchScore(tpl, fullOcrText, commonCifs);
             let score = m.score;
-            let via   = m.cifMatch ? 'CIF único + nombre' : 'nombre/web en texto';
+            let via   = m.digitHit
+                ? `dato único de la zona presente (${m.matchedDigit})`
+                : (m.zoneScore > 0 ? 'contenido de la zona en el texto' : 'sin coincidencia de la zona');
 
-            // Si el texto completo no decide, leer la zona naranja directamente
-            if (score < IDENT_MIN && tpl.identification?.rect) {
+            // Si el contenido de la zona no se ve en el texto completo, leer la zona
+            // naranja directamente como última comprobación (documento torcido, etc.).
+            if (score < IDENT_MIN && tpl.identification?.rect && (tpl.identification.text || '').trim()) {
                 const id    = await getCanvas(tpl.identification.page || 0);
                 const idTxt = await _ocrCrop(id.canvas, id.vp, tpl.identification.rect);
                 const zs    = _similarity(idTxt, tpl.identification.text || '');
-                if (zs > score) { score = zs; via = 'zona naranja'; }
+                if (zs > score) { score = zs; via = 'lectura directa de la zona naranja'; }
             }
 
             window.electronAPI.logToCmd(`   · "${tpl.nombre}": ${Math.round(score*100)}% (${via})`);
 
             if (score >= IDENT_MIN && score > bestScore) {
                 bestScore = score;
-                best = { type, tpl, score };
+                best = { type, tpl, score, matchedDigit: m.matchedDigit };
             }
         }
     }
@@ -1608,19 +1679,26 @@ async function detectTypeByOcrZonal(file, mlHint = null, fullOcrText = '') {
         return null;
     }
 
-    // Calcular el desplazamiento por el NIF si la plantilla tiene un CIF propio
+    // Calcular el desplazamiento de alineación usando el dato único de la zona
+    // (teléfono o CIF) que coincidió. Así, aunque el documento esté torcido o
+    // desplazado, alineamos TODOS los recuadros los mismos píxeles.
     let offset = { dx: 0, dy: 0 };
-    const uniqueCifs = [..._extractCifCandidates(best.tpl.identification.text || ''), ...(best.tpl.knownCifs || [])]
-        .map(_cifDigits).filter(d => d.length >= 7 && !commonCifs.has(d));
-    if (uniqueCifs.length && best.tpl.identification?.rect) {
+    const { digitRuns } = _zoneContentTokens(best.tpl);
+    const alignDigits = [...new Set([best.matchedDigit, ...digitRuns].filter(d => d && d.length >= 7 && !commonCifs.has(d)))];
+    if (alignDigits.length && best.tpl.identification?.rect) {
         try {
             const pgId = await getCanvas(best.tpl.identification.page || 0);
-            const reg  = await _findIdZoneOffset(pgId, best.tpl.identification.rect, uniqueCifs);
-            if (reg.confident) offset = { dx: reg.dx, dy: reg.dy };
+            const reg  = await _findIdZoneOffset(pgId, best.tpl.identification.rect, alignDigits);
+            if (reg.confident) {
+                offset = { dx: reg.dx, dy: reg.dy };
+                if (Math.abs(offset.dx) > 0.002 || Math.abs(offset.dy) > 0.002) {
+                    window.electronAPI.logToCmd(`📍 Alineé el documento por el dato de identificación (${Math.round(reg.score*100)}% de certeza): desplazo TODOS los recuadros ${(offset.dx*100).toFixed(1)}% en X y ${(offset.dy*100).toFixed(1)}% en Y.`);
+                }
+            }
         } catch (_) {}
     }
 
-    // Construir el nombre (offset global por NIF + búsqueda local por campo)
+    // Construir el nombre (offset global + búsqueda local por campo)
     const tplForBuild = { ...best.tpl, _gOffset: offset };
     const renameText  = await _buildRenameText(getCanvas, tplForBuild, fullOcrText);
 
@@ -1633,6 +1711,7 @@ async function detectTypeByOcrZonal(file, mlHint = null, fullOcrText = '') {
         templateId: best.tpl.id,
         confianza:  best.score >= 0.90 ? 'high' : 'medium',
         _tplNombre: best.tpl.nombre,
+        zoneOffset: offset,   // (C) las zonas se mostrarán desplazadas igual en la sugerencia
     };
 }
 
@@ -1732,37 +1811,42 @@ async function extractRenameTextForType(file, type, fullOcrText = '') {
     const getCanvas = await _loadPdfCanvases(file.path);
     if (!getCanvas) return { text: '', fromParts: false, templateId: null };
 
+    const commonCifs = _buildCommonCifSet(allTemplates);
+
     // ── Una sola plantilla: sin necesidad de comparar ────────────────────────
     if (tplIds.length === 1) {
         const tpl = tplMap[tplIds[0]];
         if (!tpl) return { text: '', fromParts: false, templateId: null };
-        const text = await _buildRenameText(getCanvas, tpl, fullOcrText);
-        return { text, fromParts: Array.isArray(tpl.renameParts) && tpl.renameParts.length > 0, templateId: tpl.id };
+        const zoneOffset = await _computeAlignOffset(getCanvas, tpl, commonCifs);
+        const text = await _buildRenameText(getCanvas, { ...tpl, _gOffset: zoneOffset }, fullOcrText);
+        return { text, fromParts: Array.isArray(tpl.renameParts) && tpl.renameParts.length > 0, templateId: tpl.id, zoneOffset };
     }
 
-    // ── Varias plantillas: elegir por NOMBRE del proveedor (+ CIF único) ──────
-    const commonCifs = _buildCommonCifSet(allTemplates);
-    let bestTpl = null, bestScore = -1;
+    // ── Varias plantillas: elegir por el CONTENIDO de la zona (+ apoyo nombre) ─
+    let bestTpl = null, bestScore = -1, bestDigit = null;
 
     for (const tplId of tplIds) {
         const tpl = tplMap[tplId];
         if (!tpl) continue;
-        let { score } = _templateMatchScore(tpl, fullOcrText, commonCifs);
+        const m = _templateMatchScore(tpl, fullOcrText, commonCifs);
+        let score = m.score;
         // Respaldo: zona naranja si el texto no decidió
         if (score < 0.6 && tpl.identification?.rect) {
             const id    = await getCanvas(tpl.identification.page || 0);
             const idTxt = await _ocrCrop(id.canvas, id.vp, tpl.identification.rect);
             score = Math.max(score, _similarity(idTxt, tpl.identification.text));
         }
-        if (score > bestScore) { bestScore = score; bestTpl = tpl; }
+        if (score > bestScore) { bestScore = score; bestTpl = tpl; bestDigit = m.matchedDigit; }
     }
 
     if (!bestTpl) return { text: '', fromParts: false, templateId: null };
-    const text = await _buildRenameText(getCanvas, bestTpl, fullOcrText);
+    const zoneOffset = await _computeAlignOffset(getCanvas, bestTpl, commonCifs, bestDigit);
+    const text = await _buildRenameText(getCanvas, { ...bestTpl, _gOffset: zoneOffset }, fullOcrText);
     return {
         text,
         fromParts:  Array.isArray(bestTpl.renameParts) && bestTpl.renameParts.length > 0,
-        templateId: bestTpl.id
+        templateId: bestTpl.id,
+        zoneOffset,
     };
 }
 
@@ -1966,10 +2050,10 @@ async function handleManualTemplateCreated(data) {
     processNextManualRename();
 }
 
-function queueForManualRename(file, fileId, detectedType, ocrText, suggestedType = null, suggestedFileName = null, suggestedTemplateId = null) {
+function queueForManualRename(file, fileId, detectedType, ocrText, suggestedType = null, suggestedFileName = null, suggestedTemplateId = null, zoneOffset = null) {
     const label = suggestedFileName ? '💡 Confirmar sugerencia...' : '⏳ En cola de revisión...';
     updateFileStatus(fileId, label, 75);
-    manualRenameQueue.push({ file, fileId, detectedType, ocrText, suggestedType, suggestedFileName, suggestedTemplateId });
+    manualRenameQueue.push({ file, fileId, detectedType, ocrText, suggestedType, suggestedFileName, suggestedTemplateId, zoneOffset });
     if (!currentManualFile) processNextManualRename();
 }
 
@@ -1981,7 +2065,7 @@ async function processNextManualRename() {
         return;
     }
     const entry = manualRenameQueue.shift();
-    const { file, fileId, detectedType, ocrText, suggestedType, suggestedFileName, suggestedTemplateId } = entry;
+    const { file, fileId, detectedType, ocrText, suggestedType, suggestedFileName, suggestedTemplateId, zoneOffset } = entry;
     currentManualFile   = file;
     currentManualFileId = fileId;
     currentManualOcrText = ocrText || '';
@@ -2005,6 +2089,7 @@ async function processNextManualRename() {
             templates,
             suggestedFileName: suggestedFileName || '',
             suggestedTemplateId: suggestedTemplateId || null,
+            zoneOffset:        zoneOffset || null,
             isHistoryCorrection: !!entry.isHistoryCorrection,
             queueCount:        manualRenameQueue.length + 1,
         });

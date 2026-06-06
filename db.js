@@ -286,6 +286,19 @@ class ZiloDatabase {
             this.db.exec("ALTER TABLE ocr_documents ADD COLUMN mode TEXT");
         }
 
+        // ── Limpieza de historial de posiciones roto ──────────────────────────
+        // Antes del fix de la clave estable, las correcciones se grababan con
+        // part_label = "undefined"/"part" (claves de fallback). Ese historial no
+        // se corresponde con ningún part.id real → lo borramos para empezar limpio.
+        try {
+            const del = this.db.prepare(
+                "DELETE FROM ocr_position_history WHERE part_label IN ('undefined','part','')"
+            ).run();
+            if (del.changes > 0) {
+                console.log('[DB] Historial de posiciones roto eliminado:', del.changes, 'filas');
+            }
+        } catch (_) { /* tabla puede no existir aún en bases muy antiguas */ }
+
         // ── Auto-migración desde JSON en primer arranque ───────────────────────
         this._migrateJsonIfNeeded();
 
@@ -934,15 +947,23 @@ class ZiloDatabase {
 
     getAllTemplates() {
         const rows = this.db.prepare('SELECT * FROM ocr_templates ORDER BY created_at ASC').all();
-        return rows.map(r => ({
-            id:             r.id,
-            nombre:         r.nombre,
-            identification: JSON.parse(r.identification || '{}'),
-            renameParts:    JSON.parse(r.rename_parts   || '[]'),
-            confirmations:  r.confirmations,
-            knownCifs:      (() => { try { return JSON.parse(r.known_cifs || '[]'); } catch { return []; } })(),
-            createdAt:      r.created_at,
-        }));
+        return rows.map(r => {
+            let parts = [];
+            try { parts = JSON.parse(r.rename_parts || '[]'); } catch (_) { parts = []; }
+            // Migración en caliente: las plantillas antiguas guardaron partes sin
+            // `id`. Asignamos uno estable y determinista por índice para que el
+            // aprendizaje por corrección use una clave consistente.
+            parts = parts.map((p, idx) => (p && p.id) ? p : { ...(p || {}), id: `ocr-${idx}` });
+            return {
+                id:             r.id,
+                nombre:         r.nombre,
+                identification: JSON.parse(r.identification || '{}'),
+                renameParts:    parts,
+                confirmations:  r.confirmations,
+                knownCifs:      (() => { try { return JSON.parse(r.known_cifs || '[]'); } catch { return []; } })(),
+                createdAt:      r.created_at,
+            };
+        });
     }
 
     /**

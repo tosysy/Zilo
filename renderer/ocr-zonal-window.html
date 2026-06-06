@@ -1465,12 +1465,16 @@ async function saveTemplate() {
     const prevText = btn.textContent;
     btn.disabled = true; btn.textContent = 'Guardando...';
 
-    const partsToSave = renameParts.map(p => {
+    const partsToSave = renameParts.map((p, idx) => {
+        // id estable: imprescindible para que el aprendizaje por corrección
+        // grabe y lea las posiciones con la MISMA clave (bug "undefined").
+        const id = p.id || `ocr-${idx}`;
         if (p.type === 'text') {
-            return { type: 'text', value: p.value || '' };
+            return { id, type: 'text', value: p.value || '' };
         }
         if (p.type === 'text-search') {
             return {
+                id,
                 type: 'text-search',
                 label: p.label || '',
                 before: p.before || '',
@@ -1480,6 +1484,7 @@ async function saveTemplate() {
         }
         // ocr
         return {
+            id,
             type: 'ocr',
             page: p.page,
             rect: p.rect,

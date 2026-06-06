@@ -232,6 +232,17 @@ function switchToEditMode() {
 
 function esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
+/**
+ * Clave ESTABLE de una parte OCR — DEBE coincidir con partKey() de app.js para que
+ * las correcciones que el usuario marca aquí se lean luego con la misma clave.
+ */
+function partKey(part) {
+    if (!part) return 'part';
+    if (part.id != null && part.id !== '') return String(part.id);
+    if (part.label) return String(part.label);
+    return 'part';
+}
+
 // ── Selector de tipos ─────────────────────────────────────────────────────────
 function buildTypeSelector(preselect) {
     const sel = document.getElementById('sel-type');
@@ -724,7 +735,7 @@ function confirmRename() {
     if (activeTpl?.renameParts) {
         for (const p of activeTpl.renameParts) {
             if (p.type === 'ocr' && partValues[p.id]) {
-                partValuesForLearning[p.label || p.id] = partValues[p.id];
+                partValuesForLearning[partKey(p)] = partValues[p.id];
             }
         }
     }
@@ -734,7 +745,7 @@ function confirmRename() {
     if (activeTpl?.renameParts) {
         for (const p of activeTpl.renameParts) {
             if (p.type === 'ocr' && correctedRects[p.id]) {
-                correctedForLearning.push({ partLabel: p.label || p.id, page: p.page || 0, rect: correctedRects[p.id] });
+                correctedForLearning.push({ partLabel: partKey(p), page: p.page || 0, rect: correctedRects[p.id] });
             }
         }
     }
@@ -885,6 +896,16 @@ function mrwDigitSubseq(exp, act) {
 /** Calcula el desplazamiento del documento buscando el CIF cerca de la zona naranja. */
 async function computeZoneOffset() {
     zoneOffset = { dx: 0, dy: 0 };
+    // Si el procesamiento ya calculó el desplazamiento que usó para identificar y
+    // alinear el documento, lo reutilizamos TAL CUAL para la plantilla detectada:
+    // así las zonas se muestran desplazadas exactamente los mismos píxeles que se
+    // usaron al leer los datos. (Si el usuario cambia a OTRA plantilla en el
+    // selector, se recalcula abajo para esa plantilla concreta.)
+    const isDetectedTpl = fileData?.suggestedTemplateId && activeTpl?.id === fileData.suggestedTemplateId;
+    if (isDetectedTpl && fileData?.zoneOffset && (Math.abs(fileData.zoneOffset.dx) > 0 || Math.abs(fileData.zoneOffset.dy) > 0)) {
+        zoneOffset = { dx: fileData.zoneOffset.dx, dy: fileData.zoneOffset.dy };
+        return;
+    }
     const idRect = activeTpl?.identification?.rect;
     if (!idRect || !pdfDoc) return;
     const exps = [
