@@ -1220,8 +1220,17 @@ async function prefillOcrFieldsFromTemplate(ocrParts) {
             y: Math.max(0, Math.min(0.98 - p.rect.h, p.rect.y + off.dy)),
             w: p.rect.w, h: p.rect.h,
         };
+        const numeric = partIsNumeric(p);
         try {
-            let text = await ocrZoneManual(r, { numeric: partIsNumeric(p) });
+            let text = await ocrZoneManual(r, { numeric });
+            // Si lee la etiqueta o ruido, desplazar el recuadro hasta encontrar el dato
+            if (mrwScoreCandidate(text, numeric) < 1 && (numeric || !text.trim())) {
+                const found = await mrwLocalSearch(r, numeric);
+                if (found.score >= 0.8 && found.text.trim()) {
+                    text = found.text;
+                    correctedRects[p.id] = found.rect;   // recordar la posición encontrada
+                }
+            }
             text = applyTransform(text, p.transform);
             if (text) {
                 inp.value = text;
@@ -1383,6 +1392,49 @@ function partIsNumeric(part) {
     if (part.transform === 'numbers_only' || part.transform === 'strip_zeros') return true;
     const lbl = (part.label || '').toLowerCase();
     return /n[uú]m|numero|pedido|albar|factura|ref|c[oó]digo|importe|nif|cif/.test(lbl);
+}
+
+/** Puntúa si un texto es el DATO buscado o una etiqueta/ruido (igual que el procesamiento). */
+function mrwScoreCandidate(txt, numeric) {
+    if (!txt || !txt.trim()) return -1;
+    const t = txt.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+    const labels = ['albaran','numero','num','fecha','codigo','cliente','pedido','referencia',
+                    'descripcion','pagina','copia','cantidad','precio','importe','total','iva',
+                    'base','forma','pago','direccion'];
+    const isLabel = labels.some(l => t.includes(l));
+    if (numeric) {
+        const digits = (txt.match(/\d/g) || []).length;
+        const letters = (txt.match(/[a-zA-Z]/g) || []).length;
+        if (digits < 2) return isLabel ? 0 : 0.1;
+        let s = 1 + Math.min(digits, 10) * 0.05 - letters * 0.05;
+        if (isLabel) s -= 0.6;
+        return s;
+    }
+    if (isLabel) return 0.2;
+    return 0.5 + Math.min(1, txt.trim().length / 12);
+}
+
+/** Búsqueda local: desplaza el recuadro por los alrededores hasta encontrar el dato. */
+async function mrwLocalSearch(rect, numeric) {
+    const dh = rect.h, dw = rect.w;
+    const offsets = [
+        { dx: 0, dy: 0 }, { dx: 0, dy: dh * 0.9 }, { dx: 0, dy: dh * 1.7 },
+        { dx: 0, dy: -dh * 0.9 }, { dx: dw * 0.6, dy: dh * 0.9 }, { dx: -dw * 0.6, dy: dh * 0.9 },
+        { dx: dw * 0.6, dy: 0 }, { dx: -dw * 0.6, dy: 0 }, { dx: 0, dy: dh * 0.45 },
+    ];
+    let best = { text: '', rect, score: -1 };
+    for (const o of offsets) {
+        const r = {
+            x: Math.max(0, Math.min(0.98 - dw, rect.x + o.dx)),
+            y: Math.max(0, Math.min(0.98 - dh, rect.y + o.dy)),
+            w: dw, h: dh,
+        };
+        const txt = await ocrZoneManual(r, { numeric });
+        const sc  = mrwScoreCandidate(txt, numeric);
+        if (sc > best.score) best = { text: txt, rect: r, score: sc };
+        if (sc >= 1.2) break;
+    }
+    return best;
 }
 
 // ── Modo creación de plantilla ────────────────────────────────────────────────

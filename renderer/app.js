@@ -1567,8 +1567,9 @@ async function detectTypeByOcrZonal(file, mlHint = null, fullOcrText = '') {
         window.electronAPI.logToCmd(`ℹ️ Ignoro estos CIF por aparecer en varias plantillas (NIF propio/compartido): ${[...commonCifs].join(', ')}`);
     }
 
-    window.electronAPI.logToCmd(`🎯 Analizando "${file.name}" — busco el NIF del proveedor en la ZONA DE IDENTIFICACIÓN (obligatorio para clasificar)...`);
+    window.electronAPI.logToCmd(`🎯 Analizando "${file.name}" — identifico al proveedor por el CONTENIDO de su zona de identificación (nombre/web/CIF)...`);
 
+    const IDENT_MIN = 0.5;   // umbral mínimo para dar por identificado al proveedor
     let best = null, bestScore = 0;
 
     for (const type of typesWithTemplate) {
@@ -1578,39 +1579,52 @@ async function detectTypeByOcrZonal(file, mlHint = null, fullOcrText = '') {
             const hasRename = (Array.isArray(tpl.renameParts) && tpl.renameParts.length) || tpl.rename?.rect;
             if (!hasRename || !tpl.identification?.rect) continue;
 
-            // CIF ÚNICO de esta plantilla (excluyendo el NIF propio/compartido)
-            const uniqueCifs = [..._extractCifCandidates(tpl.identification.text || ''), ...(tpl.knownCifs || [])]
-                .map(_cifDigits).filter(d => d.length >= 7 && !commonCifs.has(d));
+            // Identificación por CONTENIDO: nombre/web del membrete + nombre plantilla
+            // + CIF único. Lo que el usuario haya capturado en la zona naranja sirve.
+            const m = _templateMatchScore(tpl, fullOcrText, commonCifs);
+            let score = m.score;
+            let via   = m.cifMatch ? 'CIF único + nombre' : 'nombre/web en texto';
 
-            if (!uniqueCifs.length) {
-                window.electronAPI.logToCmd(`   · "${tpl.nombre}": ⚠️ sin CIF propio guardado → no puede identificarse por NIF (revisa su zona naranja).`);
-                continue;
+            // Si el texto completo no decide, leer la zona naranja directamente
+            if (score < IDENT_MIN && tpl.identification?.rect) {
+                const id    = await getCanvas(tpl.identification.page || 0);
+                const idTxt = await _ocrCrop(id.canvas, id.vp, tpl.identification.rect);
+                const zs    = _similarity(idTxt, tpl.identification.text || '');
+                if (zs > score) { score = zs; via = 'zona naranja'; }
             }
 
-            // ── REQUISITO: encontrar ese CIF en/cerca de la zona de identificación ─
-            const pgId = await getCanvas(tpl.identification.page || 0);
-            const reg  = await _findIdZoneOffset(pgId, tpl.identification.rect, uniqueCifs);
+            window.electronAPI.logToCmd(`   · "${tpl.nombre}": ${Math.round(score*100)}% (${via})`);
 
-            window.electronAPI.logToCmd(`   · "${tpl.nombre}": NIF encontrado al ${Math.round(reg.score*100)}% en la zona de identificación${reg.found ? ` (leyó "${reg.found.slice(0,20)}")` : ''}`);
-
-            if (reg.confident && reg.score > bestScore) {
-                bestScore = reg.score;
-                best = { type, tpl, offset: { dx: reg.dx, dy: reg.dy }, score: reg.score };
+            if (score >= IDENT_MIN && score > bestScore) {
+                bestScore = score;
+                best = { type, tpl, score };
             }
         }
     }
 
-    // ── ESTRICTO: sin NIF de proveedor confirmado → NO se clasifica ───────────
+    // ── Sin proveedor identificado → NO se clasifica → revisión manual ─────────
     if (!best) {
-        window.electronAPI.logToCmd('   ⛔ No encontré el NIF de ningún proveedor en la zona de identificación → NO asigno plantilla. El documento va a REVISIÓN MANUAL.');
+        window.electronAPI.logToCmd('   ⛔ No identifiqué a ningún proveedor (su nombre/web/CIF no aparece) → REVISIÓN MANUAL.');
         return null;
     }
 
-    // Construir el nombre con el desplazamiento ya calculado por el NIF
-    const tplForBuild = { ...best.tpl, _gOffset: best.offset };
+    // Calcular el desplazamiento por el NIF si la plantilla tiene un CIF propio
+    let offset = { dx: 0, dy: 0 };
+    const uniqueCifs = [..._extractCifCandidates(best.tpl.identification.text || ''), ...(best.tpl.knownCifs || [])]
+        .map(_cifDigits).filter(d => d.length >= 7 && !commonCifs.has(d));
+    if (uniqueCifs.length && best.tpl.identification?.rect) {
+        try {
+            const pgId = await getCanvas(best.tpl.identification.page || 0);
+            const reg  = await _findIdZoneOffset(pgId, best.tpl.identification.rect, uniqueCifs);
+            if (reg.confident) offset = { dx: reg.dx, dy: reg.dy };
+        } catch (_) {}
+    }
+
+    // Construir el nombre (offset global por NIF + búsqueda local por campo)
+    const tplForBuild = { ...best.tpl, _gOffset: offset };
     const renameText  = await _buildRenameText(getCanvas, tplForBuild, fullOcrText);
 
-    window.electronAPI.logToCmd(`   ✅ ELEGIDA la plantilla "${best.tpl.nombre}" (tipo ${best.type.name}) — NIF confirmado al ${Math.round(best.score*100)}%.`);
+    window.electronAPI.logToCmd(`   ✅ ELEGIDA la plantilla "${best.tpl.nombre}" (tipo ${best.type.name}) — proveedor identificado al ${Math.round(best.score*100)}%.`);
 
     return {
         type: best.type,
