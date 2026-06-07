@@ -439,7 +439,8 @@ function validateDestination() {
 async function processFile(file, fileId) {
     try {
         updateFileStatus(fileId, 'Extrayendo texto...', 30);
-        const text = await extractTextFromPDF(file);
+        const { text, words } = await extractTextFromPDF(file);
+        file._ocrWords = words;   // posiciones de palabra para alinear con precisión
 
         updateFileStatus(fileId, 'Analizando contenido...', 60);
 
@@ -1358,18 +1359,76 @@ async function _findIdZoneOffset(pg, idRect, expectedDigitsList) {
 }
 
 /**
- * Calcula el desplazamiento de alineación (offset global) de una plantilla usando
- * el dato único de su zona de identificación (teléfono/CIF). Devuelve {dx,dy} en
- * coordenadas normalizadas. Compartido por la detección automática y el modo tipo
- * directo para que la sugerencia muestre los recuadros desplazados igual.
+ * Offset PRECISO a partir de las posiciones de palabra del OCR de página completa.
+ * Localiza el CIF/teléfono esperado (uniendo palabras contiguas si el número viene
+ * partido) y calcula cuánto se ha desplazado respecto a la zona de identificación.
+ * Mucho más fiable que la rejilla ciega `_findIdZoneOffset` en escaneos.
+ * @returns {{ dx, dy, confident, score }}
  */
-async function _computeAlignOffset(getCanvas, tpl, commonCifs = null, matchedDigit = null) {
+function _findOffsetFromWords(pageWords, idRect, expectedDigits) {
+    const none = { dx: 0, dy: 0, confident: false, score: 0 };
+    if (!pageWords?.length || !idRect) return none;
+    const exps = (expectedDigits || []).filter(d => d && d.length >= 7);
+    if (!exps.length) return none;
+
+    const words = pageWords
+        .map(w => ({ ...w, digits: (w.text || '').replace(/[^0-9]/g, '') }))
+        .filter(w => w.digits.length >= 1)
+        .sort((a, b) => (a.cy - b.cy) || (a.cx - b.cx));
+
+    let best = { score: 0, cx: 0, cy: 0 };
+    const consider = (digits, cx, cy) => {
+        if (digits.length < 5) return;
+        let s = 0;
+        for (const e of exps) s = Math.max(s, _digitSubseqScore(e, digits));
+        if (s > best.score) best = { score: s, cx, cy };
+    };
+
+    for (let i = 0; i < words.length; i++) {
+        consider(words[i].digits, words[i].cx, words[i].cy);
+        // Unir hasta 3 palabras contiguas de la misma línea (números partidos)
+        let digits = words[i].digits;
+        let minx = words[i].cx - words[i].w / 2, maxx = words[i].cx + words[i].w / 2;
+        for (let j = i + 1; j < Math.min(i + 4, words.length); j++) {
+            if (Math.abs(words[j].cy - words[i].cy) > words[i].h * 0.8) break;  // otra línea
+            digits += words[j].digits;
+            minx = Math.min(minx, words[j].cx - words[j].w / 2);
+            maxx = Math.max(maxx, words[j].cx + words[j].w / 2);
+            consider(digits, (minx + maxx) / 2, words[i].cy);
+        }
+    }
+
+    if (best.score < 0.85) return none;
+    const idcx = idRect.x + idRect.w / 2, idcy = idRect.y + idRect.h / 2;
+    return { dx: best.cx - idcx, dy: best.cy - idcy, confident: true, score: best.score };
+}
+
+/**
+ * Calcula el desplazamiento de alineación (offset global) de una plantilla usando
+ * el dato único de su zona de identificación (teléfono/CIF). Prefiere la posición
+ * REAL de la palabra (precisa); si no hay words o no casa, cae a la rejilla OCR.
+ * Devuelve {dx,dy} en coordenadas normalizadas. Compartido por la detección
+ * automática y el modo tipo directo para que la sugerencia muestre los recuadros
+ * desplazados igual.
+ */
+async function _computeAlignOffset(getCanvas, tpl, commonCifs = null, matchedDigit = null, pageWords = null) {
     const off0 = { dx: 0, dy: 0 };
     if (!tpl?.identification?.rect) return off0;
     const { digitRuns } = _zoneContentTokens(tpl);
     const alignDigits = [...new Set([matchedDigit, ...digitRuns]
         .filter(d => d && d.length >= 7 && !(commonCifs && commonCifs.has(d))))];
     if (!alignDigits.length) return off0;
+
+    // 1) Posición real de la palabra (preciso y fiable)
+    const byWords = _findOffsetFromWords(pageWords, tpl.identification.rect, alignDigits);
+    if (byWords.confident) {
+        if (Math.abs(byWords.dx) > 0.002 || Math.abs(byWords.dy) > 0.002) {
+            window.electronAPI.logToCmd(`📍 Alineé por la posición REAL del NIF (${Math.round(byWords.score*100)}%): desplazo los recuadros ${(byWords.dx*100).toFixed(1)}% en X y ${(byWords.dy*100).toFixed(1)}% en Y.`);
+        }
+        return { dx: byWords.dx, dy: byWords.dy };
+    }
+
+    // 2) Fallback: rejilla OCR alrededor de la zona
     try {
         const pgId = await getCanvas(tpl.identification.page || 0);
         const reg  = await _findIdZoneOffset(pgId, tpl.identification.rect, alignDigits);
@@ -1680,23 +1739,10 @@ async function detectTypeByOcrZonal(file, mlHint = null, fullOcrText = '') {
     }
 
     // Calcular el desplazamiento de alineación usando el dato único de la zona
-    // (teléfono o CIF) que coincidió. Así, aunque el documento esté torcido o
-    // desplazado, alineamos TODOS los recuadros los mismos píxeles.
-    let offset = { dx: 0, dy: 0 };
-    const { digitRuns } = _zoneContentTokens(best.tpl);
-    const alignDigits = [...new Set([best.matchedDigit, ...digitRuns].filter(d => d && d.length >= 7 && !commonCifs.has(d)))];
-    if (alignDigits.length && best.tpl.identification?.rect) {
-        try {
-            const pgId = await getCanvas(best.tpl.identification.page || 0);
-            const reg  = await _findIdZoneOffset(pgId, best.tpl.identification.rect, alignDigits);
-            if (reg.confident) {
-                offset = { dx: reg.dx, dy: reg.dy };
-                if (Math.abs(offset.dx) > 0.002 || Math.abs(offset.dy) > 0.002) {
-                    window.electronAPI.logToCmd(`📍 Alineé el documento por el dato de identificación (${Math.round(reg.score*100)}% de certeza): desplazo TODOS los recuadros ${(offset.dx*100).toFixed(1)}% en X y ${(offset.dy*100).toFixed(1)}% en Y.`);
-                }
-            }
-        } catch (_) {}
-    }
+    // (teléfono o CIF) que coincidió, preferentemente por su POSICIÓN REAL de
+    // palabra. Así alineamos TODOS los recuadros los mismos píxeles.
+    const idPageWords = (file._ocrWords || []).find(p => p.page === (best.tpl.identification?.page || 0))?.words || null;
+    const offset = await _computeAlignOffset(getCanvas, best.tpl, commonCifs, best.matchedDigit, idPageWords);
 
     // Construir el nombre (offset global + búsqueda local por campo)
     const tplForBuild = { ...best.tpl, _gOffset: offset };
@@ -1812,12 +1858,13 @@ async function extractRenameTextForType(file, type, fullOcrText = '') {
     if (!getCanvas) return { text: '', fromParts: false, templateId: null };
 
     const commonCifs = _buildCommonCifSet(allTemplates);
+    const wordsFor = (tpl) => (file._ocrWords || []).find(p => p.page === (tpl.identification?.page || 0))?.words || null;
 
     // ── Una sola plantilla: sin necesidad de comparar ────────────────────────
     if (tplIds.length === 1) {
         const tpl = tplMap[tplIds[0]];
         if (!tpl) return { text: '', fromParts: false, templateId: null };
-        const zoneOffset = await _computeAlignOffset(getCanvas, tpl, commonCifs);
+        const zoneOffset = await _computeAlignOffset(getCanvas, tpl, commonCifs, null, wordsFor(tpl));
         const text = await _buildRenameText(getCanvas, { ...tpl, _gOffset: zoneOffset }, fullOcrText);
         return { text, fromParts: Array.isArray(tpl.renameParts) && tpl.renameParts.length > 0, templateId: tpl.id, zoneOffset };
     }
@@ -1840,7 +1887,7 @@ async function extractRenameTextForType(file, type, fullOcrText = '') {
     }
 
     if (!bestTpl) return { text: '', fromParts: false, templateId: null };
-    const zoneOffset = await _computeAlignOffset(getCanvas, bestTpl, commonCifs, bestDigit);
+    const zoneOffset = await _computeAlignOffset(getCanvas, bestTpl, commonCifs, bestDigit, wordsFor(bestTpl));
     const text = await _buildRenameText(getCanvas, { ...bestTpl, _gOffset: zoneOffset }, fullOcrText);
     return {
         text,
@@ -1931,7 +1978,8 @@ async function processWatchedFile(fileData) {
 
     try {
         updateFileStatus(fileId, 'Extrayendo texto...', 30);
-        const text = await extractTextFromPDF(file);
+        const { text, words } = await extractTextFromPDF(file);
+        file._ocrWords = words;   // posiciones de palabra para alinear con precisión
 
         updateFileStatus(fileId, 'Detectando tipo...', 60);
         const matched = await detectDocumentType(file, text);
@@ -2264,6 +2312,7 @@ async function extractTextFromPDF(file) {
     const totalPages   = pdf.numPages;
     const pagesToProc  = maxPagesToProcess === 0 ? totalPages : Math.min(totalPages, maxPagesToProcess);
     let   combinedText = '';
+    const wordsByPage  = [];   // [{ page, words: [{ text, conf, cx, cy, w, h }] }]
 
     for (let pageNum = 1; pageNum <= pagesToProc; pageNum++) {
         try {
@@ -2276,6 +2325,12 @@ async function extractTextFromPDF(file) {
             const straight = _autoDeskew(canvas, file.name);   // enderezar antes de OCR
             const { data } = await Tesseract.recognize(straight.toDataURL('image/png'), 'spa');
             combinedText  += data.text + '\n';
+            // Posiciones de palabra (normalizadas 0..1 en el MISMO canvas deskewado)
+            // → permiten localizar con precisión el NIF/CIF y los datos.
+            wordsByPage.push({
+                page:  pageNum - 1,
+                words: _normalizeOcrWords(data, straight.width, straight.height),
+            });
         } catch (pageErr) {
             console.warn(`[OCR] Error en página ${pageNum}:`, pageErr.message);
             // Continuar con las demás páginas
@@ -2288,7 +2343,37 @@ async function extractTextFromPDF(file) {
         console.warn(`[OCR] Texto extraído insuficiente (${meaningful} chars) en "${file.name}" — PDF escaneado sin capa de texto?`);
     }
 
-    return combinedText;
+    return { text: combinedText, words: wordsByPage };
+}
+
+/**
+ * Extrae las palabras de un resultado de Tesseract con su posición NORMALIZADA
+ * (centro y tamaño en 0..1) respecto al canvas de ancho/alto dados. Tesseract.js
+ * expone `data.words[].bbox = {x0,y0,x1,y1}`; si por la versión no viniese poblado,
+ * se intenta reconstruir desde `data.lines`/`data.blocks`.
+ */
+function _normalizeOcrWords(data, cw, ch) {
+    if (!cw || !ch) return [];
+    let raw = Array.isArray(data?.words) ? data.words : [];
+    if (!raw.length && Array.isArray(data?.lines)) {
+        raw = data.lines.flatMap(l => Array.isArray(l.words) ? l.words : []);
+    }
+    const out = [];
+    for (const w of raw) {
+        const b = w?.bbox;
+        if (!b || b.x1 == null) continue;
+        const text = (w.text || '').trim();
+        if (!text) continue;
+        out.push({
+            text,
+            conf: w.confidence != null ? w.confidence : 0,
+            cx: ((b.x0 + b.x1) / 2) / cw,
+            cy: ((b.y0 + b.y1) / 2) / ch,
+            w:  (b.x1 - b.x0) / cw,
+            h:  (b.y1 - b.y0) / ch,
+        });
+    }
+    return out;
 }
 
 // =================================================================================
