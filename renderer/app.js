@@ -1404,6 +1404,57 @@ function _findOffsetFromWords(pageWords, idRect, expectedDigits) {
     return { dx: best.cx - idcx, dy: best.cy - idcy, confident: true, score: best.score };
 }
 
+function _median(arr) {
+    if (!arr.length) return 0;
+    const s = [...arr].sort((a, b) => a - b);
+    const m = s.length >> 1;
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+}
+
+/**
+ * Offset de alineación cuando la zona de identificación NO tiene un dígito único
+ * (p.ej. el membrete/logo "SANVICOR herramientas industriales … www.sanvicor.es").
+ * Localiza en el documento las palabras de la zona y usa la MEDIANA de sus
+ * posiciones (robusta a apariciones dispersas) para estimar cuánto se ha desplazado
+ * el documento respecto a la zona de identificación de la plantilla.
+ * @returns {{ dx, dy, confident, score }}
+ */
+function _findZoneOffsetFromWords(pageWords, idRect, idText, knownCifs) {
+    const none = { dx: 0, dy: 0, confident: false, score: 0 };
+    if (!pageWords?.length || !idRect) return none;
+    const idWords = [...new Set(
+        _normalizeText(idText || '').split(/\s+/)
+            .filter(w => w.length >= 4 && !/^\d+$/.test(w) && !_GENERIC_WORDS.has(w))
+    )];
+    const idDigits = [
+        ...((idText || '').match(/\d[\d\s.\-]{4,}\d/g) || []).map(s => s.replace(/\D/g, '')).filter(d => d.length >= 6),
+        ...((knownCifs || []).map(c => String(c).replace(/[^0-9]/g, '')).filter(d => d.length >= 7)),
+    ];
+    if (!idWords.length && !idDigits.length) return none;
+
+    const pts = [];
+    for (const w of pageWords) {
+        const t = _normalizeText(w.text || '');
+        const d = (w.text || '').replace(/[^0-9]/g, '');
+        let hit = idWords.some(iw => t.includes(iw));
+        if (!hit && d.length >= 5) hit = idDigits.some(id => d.includes(id) || id.includes(d));
+        if (hit) pts.push({ x: w.cx, y: w.cy });
+    }
+    if (pts.length < 2) return none;   // necesitamos al menos 2 anclas para fiarnos
+
+    // Mediana robusta y luego acotar al CLÚSTER (el membrete) descartando apariciones
+    // dispersas de la misma palabra en el cuerpo del documento.
+    const mx = _median(pts.map(p => p.x)), my = _median(pts.map(p => p.y));
+    const near = pts.filter(p => Math.abs(p.x - mx) < 0.20 && Math.abs(p.y - my) < 0.20);
+    const use  = near.length >= 2 ? near : pts;
+    const cx = use.reduce((s, p) => s + p.x, 0) / use.length;
+    const cy = use.reduce((s, p) => s + p.y, 0) / use.length;
+
+    const idcx = idRect.x + idRect.w / 2, idcy = idRect.y + idRect.h / 2;
+    const score = Math.min(1, use.length / Math.max(2, idWords.length || 2));
+    return { dx: cx - idcx, dy: cy - idcy, confident: true, score };
+}
+
 /**
  * Localiza el recuadro EXACTO donde aparece un valor leído, usando las posiciones
  * de palabra del OCR. Sirve para que la preview dibuje el recuadro justo encima del
@@ -1480,10 +1531,11 @@ async function _computeAlignOffset(getCanvas, tpl, commonCifs = null, matchedDig
     const { digitRuns } = _zoneContentTokens(tpl);
     const alignDigits = [...new Set([matchedDigit, ...digitRuns]
         .filter(d => d && d.length >= 7 && !(commonCifs && commonCifs.has(d))))];
-    if (!alignDigits.length) return off0;
 
-    // 1) Posición real de la palabra (preciso y fiable)
-    const byWords = _findOffsetFromWords(pageWords, tpl.identification.rect, alignDigits);
+    // 1) Posición real del dígito único (preciso y fiable cuando existe)
+    const byWords = alignDigits.length
+        ? _findOffsetFromWords(pageWords, tpl.identification.rect, alignDigits)
+        : { confident: false };
     if (byWords.confident) {
         if (Math.abs(byWords.dx) > 0.002 || Math.abs(byWords.dy) > 0.002) {
             window.electronAPI.logToCmd(`📍 Alineé por la posición REAL del NIF (${Math.round(byWords.score*100)}%): desplazo los recuadros ${(byWords.dx*100).toFixed(1)}% en X y ${(byWords.dy*100).toFixed(1)}% en Y.`);
@@ -1491,7 +1543,16 @@ async function _computeAlignOffset(getCanvas, tpl, commonCifs = null, matchedDig
         return { dx: byWords.dx, dy: byWords.dy };
     }
 
-    // 2) Fallback: rejilla OCR alrededor de la zona
+    // 2) Sin dígito único → alinear por las PALABRAS de la zona (membrete/logo)
+    const byZone = _findZoneOffsetFromWords(pageWords, tpl.identification.rect, tpl.identification.text, tpl.knownCifs);
+    if (byZone.confident) {
+        if (Math.abs(byZone.dx) > 0.002 || Math.abs(byZone.dy) > 0.002) {
+            window.electronAPI.logToCmd(`📍 Alineé por el membrete/identificación: desplazo los recuadros ${(byZone.dx*100).toFixed(1)}% en X y ${(byZone.dy*100).toFixed(1)}% en Y.`);
+        }
+        return { dx: byZone.dx, dy: byZone.dy };
+    }
+
+    // 3) Fallback: rejilla OCR alrededor de la zona
     try {
         const pgId = await getCanvas(tpl.identification.page || 0);
         const reg  = await _findIdZoneOffset(pgId, tpl.identification.rect, alignDigits);
@@ -2419,6 +2480,9 @@ async function extractTextFromPDF(file) {
     if (meaningful < 10) {
         console.warn(`[OCR] Texto extraído insuficiente (${meaningful} chars) en "${file.name}" — PDF escaneado sin capa de texto?`);
     }
+
+    const wc = (wordsByPage[0]?.words || []).length;
+    window.electronAPI.logToCmd(`🔤 OCR capturó ${wc} palabras con posición en la 1ª página (necesarias para alinear los recuadros).`);
 
     return { text: combinedText, words: wordsByPage };
 }
