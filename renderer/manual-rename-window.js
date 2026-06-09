@@ -1175,12 +1175,18 @@ function renderOverlay() {
         if (idr && (activeTpl.identification.page || 0) === 0) {
             drawZoneRect(shift(idr), '#f59e0b', 'rgba(245,158,11,0.15)', '🔍 NIF/Identificación');
         }
+        // Recuadros sobre el dato REAL calculados durante el procesamiento
+        // (posición exacta del valor leído). Si no llegan, se usa el desplazamiento.
+        const finalRects = (fileData?.partFinalRects && activeTpl?.id === fileData.suggestedTemplateId)
+            ? fileData.partFinalRects : null;
         let ocrIdx = 0;
         for (const p of (activeTpl.renameParts || [])) {
             if (p.type !== 'ocr' || !p.rect) continue;
             if ((p.page || 0) !== 0) continue;
             ocrIdx++;
-            drawZoneRect(shift(p.rect), '#10b981', 'rgba(16,185,129,0.15)',
+            const real = finalRects && finalRects[p.id];
+            const box  = real ? real : shift(p.rect);
+            drawZoneRect(box, '#10b981', 'rgba(16,185,129,0.15)',
                 p.label ? `${p.label}` : `Dato ${ocrIdx}`);
         }
     }

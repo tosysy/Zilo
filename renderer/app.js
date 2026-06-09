@@ -453,7 +453,7 @@ async function processFile(file, fileId) {
         // ── Modo tipo directo ──────────────────────────────────────────────────
         if (currentMode === 'type' && currentDocType) {
             let renameText = '', fromParts = false, tplId = null;
-            let dirOffset = null;
+            let dirOffset = null, dirRects = null;
             if (_getTypeTemplateIds(currentDocType).length) {
                 updateFileStatus(fileId, 'Extrayendo nombre...', 55);
                 const r = await extractRenameTextForType(file, currentDocType, text);
@@ -461,6 +461,7 @@ async function processFile(file, fileId) {
                 fromParts  = r.fromParts || false;
                 tplId      = r.templateId || null;
                 dirOffset  = r.zoneOffset || null;
+                dirRects   = r.partFinalRects || null;
             }
             // Fallback: patrones aprendidos si no hay template OCR configurado
             if (!renameText && text) {
@@ -473,7 +474,7 @@ async function processFile(file, fileId) {
             } else {
                 const suggested = generateAdaptiveName(file.name, currentDocType, renameText, fromParts);
                 updateFileStatus(fileId, `💡 Confirmar: ${suggested}`, 70);
-                queueForManualRename(file, fileId, currentDocType.name, text, currentDocType, suggested, tplId, dirOffset);
+                queueForManualRename(file, fileId, currentDocType.name, text, currentDocType, suggested, tplId, dirOffset, dirRects);
             }
             return;
         }
@@ -492,14 +493,14 @@ async function processFile(file, fileId) {
                 } else {
                     const suggested = generateAdaptiveName(file.name, matched.type, matched.renameText, matched.fromParts);
                     updateFileStatus(fileId, `💡 ${matched.type.name} — confirmar...`, 70);
-                    queueForManualRename(file, fileId, matched.type.name, text, matched.type, suggested, matched.templateId, matched.zoneOffset);
+                    queueForManualRename(file, fileId, matched.type.name, text, matched.type, suggested, matched.templateId, matched.zoneOffset, matched.partFinalRects);
                 }
             } else if (matched && matched.confianza === 'medium') {
                 const suggested = matched.renameText
                     ? generateAdaptiveName(file.name, matched.type, matched.renameText, matched.fromParts)
                     : null;
                 updateFileStatus(fileId, `🟡 Posible: ${matched.type.name} — confirmar...`, 70);
-                queueForManualRename(file, fileId, matched.type.name, text, matched.type, suggested, matched.templateId, matched.zoneOffset);
+                queueForManualRename(file, fileId, matched.type.name, text, matched.type, suggested, matched.templateId, matched.zoneOffset, matched.partFinalRects);
             } else {
                 updateFileStatus(fileId, '⚠️ Tipo no detectado → revisión manual', 70);
                 queueForManualRename(file, fileId, null, text);
@@ -1404,6 +1405,68 @@ function _findOffsetFromWords(pageWords, idRect, expectedDigits) {
 }
 
 /**
+ * Localiza el recuadro EXACTO donde aparece un valor leído, usando las posiciones
+ * de palabra del OCR. Sirve para que la preview dibuje el recuadro justo encima del
+ * dato real (no en la posición original de la plantilla). Si el valor sale repetido,
+ * elige la aparición más cercana a la posición esperada (recuadro desplazado).
+ * @returns {{x,y,w,h}|null}
+ */
+function _findValueRectInWords(pageWords, value, expectedRect = null, numeric = false) {
+    if (!pageWords?.length || !value || !value.trim()) return null;
+    const norm = s => (s || '').toLowerCase().replace(/\s+/g, '');
+    const valDigits = value.replace(/[^0-9]/g, '');
+    const valNorm   = norm(value);
+    const useDigits = numeric || (valDigits.length >= 4);
+    if (useDigits && valDigits.length < 3) return null;
+    if (!useDigits && valNorm.length < 3) return null;
+
+    const sorted = pageWords.filter(w => (w.text || '').trim())
+        .sort((a, b) => (a.cy - b.cy) || (a.cx - b.cx));
+
+    const cands = [];
+    for (let i = 0; i < sorted.length; i++) {
+        let txt = sorted[i].text;
+        let minx = sorted[i].cx - sorted[i].w / 2, maxx = sorted[i].cx + sorted[i].w / 2;
+        let miny = sorted[i].cy - sorted[i].h / 2, maxy = sorted[i].cy + sorted[i].h / 2;
+        const push = () => cands.push({ txt, x: minx, y: miny, w: maxx - minx, h: maxy - miny,
+            cx: (minx + maxx) / 2, cy: (miny + maxy) / 2 });
+        push();
+        for (let j = i + 1; j < Math.min(i + 3, sorted.length); j++) {
+            if (Math.abs(sorted[j].cy - sorted[i].cy) > sorted[i].h * 0.8) break;
+            txt += sorted[j].text;
+            minx = Math.min(minx, sorted[j].cx - sorted[j].w / 2);
+            maxx = Math.max(maxx, sorted[j].cx + sorted[j].w / 2);
+            miny = Math.min(miny, sorted[j].cy - sorted[j].h / 2);
+            maxy = Math.max(maxy, sorted[j].cy + sorted[j].h / 2);
+            push();
+        }
+    }
+
+    let matches = cands.filter(c => {
+        if (useDigits) { const d = c.txt.replace(/[^0-9]/g, ''); return d === valDigits || (valDigits && d.includes(valDigits)); }
+        return norm(c.txt).includes(valNorm);
+    });
+    if (!matches.length) return null;
+
+    if (expectedRect) {
+        const ex = expectedRect.x + expectedRect.w / 2, ey = expectedRect.y + expectedRect.h / 2;
+        matches.sort((a, b) =>
+            ((a.cx - ex) ** 2 + (a.cy - ey) ** 2) - ((b.cx - ex) ** 2 + (b.cy - ey) ** 2));
+    } else {
+        matches.sort((a, b) => a.txt.length - b.txt.length);
+    }
+
+    const best = matches[0];
+    const pad = 0.004;
+    return {
+        x: Math.max(0, best.x - pad),
+        y: Math.max(0, best.y - pad),
+        w: Math.min(1, best.w + pad * 2),
+        h: Math.min(1, best.h + pad * 2),
+    };
+}
+
+/**
  * Calcula el desplazamiento de alineación (offset global) de una plantilla usando
  * el dato único de su zona de identificación (teléfono/CIF). Prefiere la posición
  * REAL de la palabra (precisa); si no hay words o no casa, cae a la rejilla OCR.
@@ -1456,6 +1519,7 @@ async function _buildRenameText(getCanvas, tpl, fullOcrText = '') {
         }
 
         const segments = [];
+        const partFinalRects = {};   // { partId: rect real donde está el dato (para la preview) }
         for (const part of tpl.renameParts) {
             if (part.type === 'text') {
                 segments.push(part.value || '');
@@ -1509,10 +1573,17 @@ async function _buildRenameText(getCanvas, tpl, fullOcrText = '') {
                     }
                 }
 
+                // ── Recuadro REAL para la preview: situar el recuadro justo encima
+                //    del valor leído (usando posiciones de palabra del OCR) ───────
+                const partWords = (tpl._allWords || []).find(p => p.page === (part.page || 0))?.words || null;
+                const realRect  = _findValueRectInWords(partWords, text, rect, numeric);
+                partFinalRects[partKey(part)] = realRect || rect;
+
                 text = _applyPartTransform(text, part.transform || 'none');
                 segments.push(text);
             }
         }
+        tpl._partFinalRects = partFinalRects;   // leído por el llamador para la preview
         return segments.join('').trim();
     }
     // Compatibilidad con plantillas antiguas (campo rename)
@@ -1551,7 +1622,7 @@ async function detectDocumentType(file, ocrText) {
 
     // ── Alta confianza ML (≥0.80) + suficientes ejemplos ─────────────────────
     if (mlType && mlResult.confidence >= 0.80 && mlResult.docCount >= 5) {
-        let renameText = '', fromParts = false, templateId = null, zoneOffset = null;
+        let renameText = '', fromParts = false, templateId = null, zoneOffset = null, partFinalRects = null;
         if (_getTypeTemplateIds(mlType).length) {
             try {
                 const r  = await extractRenameTextForType(file, mlType, ocrText);
@@ -1559,6 +1630,7 @@ async function detectDocumentType(file, ocrText) {
                 fromParts  = r.fromParts || false;
                 templateId = r.templateId || null;
                 zoneOffset = r.zoneOffset || null;
+                partFinalRects = r.partFinalRects || null;
             } catch (_) {}
         }
         // Fallback: patrones aprendidos de ejemplos manuales
@@ -1566,7 +1638,7 @@ async function detectDocumentType(file, ocrText) {
             renameText = await _extractByLearnedPattern(ocrText, mlType.name);
         }
         return {
-            type: mlType, renameText, fromParts, templateId, zoneOffset,
+            type: mlType, renameText, fromParts, templateId, zoneOffset, partFinalRects,
             confianza: 'high', source: 'ml',
             mlConfidence: mlResult.confidence,
         };
@@ -1745,7 +1817,7 @@ async function detectTypeByOcrZonal(file, mlHint = null, fullOcrText = '') {
     const offset = await _computeAlignOffset(getCanvas, best.tpl, commonCifs, best.matchedDigit, idPageWords);
 
     // Construir el nombre (offset global + búsqueda local por campo)
-    const tplForBuild = { ...best.tpl, _gOffset: offset };
+    const tplForBuild = { ...best.tpl, _gOffset: offset, _allWords: file._ocrWords };
     const renameText  = await _buildRenameText(getCanvas, tplForBuild, fullOcrText);
 
     window.electronAPI.logToCmd(`   ✅ ELEGIDA la plantilla "${best.tpl.nombre}" (tipo ${best.type.name}) — proveedor identificado al ${Math.round(best.score*100)}%.`);
@@ -1758,6 +1830,7 @@ async function detectTypeByOcrZonal(file, mlHint = null, fullOcrText = '') {
         confianza:  best.score >= 0.90 ? 'high' : 'medium',
         _tplNombre: best.tpl.nombre,
         zoneOffset: offset,   // (C) las zonas se mostrarán desplazadas igual en la sugerencia
+        partFinalRects: tplForBuild._partFinalRects || null,   // (D) recuadros sobre el dato real
     };
 }
 
@@ -1865,8 +1938,9 @@ async function extractRenameTextForType(file, type, fullOcrText = '') {
         const tpl = tplMap[tplIds[0]];
         if (!tpl) return { text: '', fromParts: false, templateId: null };
         const zoneOffset = await _computeAlignOffset(getCanvas, tpl, commonCifs, null, wordsFor(tpl));
-        const text = await _buildRenameText(getCanvas, { ...tpl, _gOffset: zoneOffset }, fullOcrText);
-        return { text, fromParts: Array.isArray(tpl.renameParts) && tpl.renameParts.length > 0, templateId: tpl.id, zoneOffset };
+        const tb = { ...tpl, _gOffset: zoneOffset, _allWords: file._ocrWords };
+        const text = await _buildRenameText(getCanvas, tb, fullOcrText);
+        return { text, fromParts: Array.isArray(tpl.renameParts) && tpl.renameParts.length > 0, templateId: tpl.id, zoneOffset, partFinalRects: tb._partFinalRects || null };
     }
 
     // ── Varias plantillas: elegir por el CONTENIDO de la zona (+ apoyo nombre) ─
@@ -1888,12 +1962,14 @@ async function extractRenameTextForType(file, type, fullOcrText = '') {
 
     if (!bestTpl) return { text: '', fromParts: false, templateId: null };
     const zoneOffset = await _computeAlignOffset(getCanvas, bestTpl, commonCifs, bestDigit, wordsFor(bestTpl));
-    const text = await _buildRenameText(getCanvas, { ...bestTpl, _gOffset: zoneOffset }, fullOcrText);
+    const tb = { ...bestTpl, _gOffset: zoneOffset, _allWords: file._ocrWords };
+    const text = await _buildRenameText(getCanvas, tb, fullOcrText);
     return {
         text,
         fromParts:  Array.isArray(bestTpl.renameParts) && bestTpl.renameParts.length > 0,
         templateId: bestTpl.id,
         zoneOffset,
+        partFinalRects: tb._partFinalRects || null,
     };
 }
 
@@ -2098,10 +2174,10 @@ async function handleManualTemplateCreated(data) {
     processNextManualRename();
 }
 
-function queueForManualRename(file, fileId, detectedType, ocrText, suggestedType = null, suggestedFileName = null, suggestedTemplateId = null, zoneOffset = null) {
+function queueForManualRename(file, fileId, detectedType, ocrText, suggestedType = null, suggestedFileName = null, suggestedTemplateId = null, zoneOffset = null, partFinalRects = null) {
     const label = suggestedFileName ? '💡 Confirmar sugerencia...' : '⏳ En cola de revisión...';
     updateFileStatus(fileId, label, 75);
-    manualRenameQueue.push({ file, fileId, detectedType, ocrText, suggestedType, suggestedFileName, suggestedTemplateId, zoneOffset });
+    manualRenameQueue.push({ file, fileId, detectedType, ocrText, suggestedType, suggestedFileName, suggestedTemplateId, zoneOffset, partFinalRects });
     if (!currentManualFile) processNextManualRename();
 }
 
@@ -2113,7 +2189,7 @@ async function processNextManualRename() {
         return;
     }
     const entry = manualRenameQueue.shift();
-    const { file, fileId, detectedType, ocrText, suggestedType, suggestedFileName, suggestedTemplateId, zoneOffset } = entry;
+    const { file, fileId, detectedType, ocrText, suggestedType, suggestedFileName, suggestedTemplateId, zoneOffset, partFinalRects } = entry;
     currentManualFile   = file;
     currentManualFileId = fileId;
     currentManualOcrText = ocrText || '';
@@ -2138,6 +2214,7 @@ async function processNextManualRename() {
             suggestedFileName: suggestedFileName || '',
             suggestedTemplateId: suggestedTemplateId || null,
             zoneOffset:        zoneOffset || null,
+            partFinalRects:    partFinalRects || null,
             isHistoryCorrection: !!entry.isHistoryCorrection,
             queueCount:        manualRenameQueue.length + 1,
         });
