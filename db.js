@@ -188,6 +188,34 @@ class ZiloDatabase {
                 ON ocr_position_history(template_id, part_label, page);
         `);
 
+        // ── Aprendizaje por campo: votos de ancla/lado/patrón ────────────────
+        this.db.exec(`
+            -- Votos acumulativos por campo. kind ∈ {anchor, side, pattern}.
+            -- El valor efectivo de cada kind = el de mayor 'count'.
+            CREATE TABLE IF NOT EXISTS ocr_field_votes (
+                template_id TEXT    NOT NULL,
+                part_label  TEXT    NOT NULL,
+                kind        TEXT    NOT NULL,        -- 'anchor' | 'side' | 'pattern'
+                value       TEXT    NOT NULL,
+                count       INTEGER NOT NULL DEFAULT 0,
+                updated_at  INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+                PRIMARY KEY (template_id, part_label, kind, value)
+            );
+            CREATE INDEX IF NOT EXISTS idx_field_votes
+                ON ocr_field_votes(template_id, part_label, kind);
+
+            -- Resultado de cada documento por plantilla (para la confianza de auto).
+            -- all_ok = 1 si todos los campos se extrajeron bien y el usuario NO corrigió.
+            CREATE TABLE IF NOT EXISTS ocr_template_outcomes (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                template_id TEXT    NOT NULL,
+                ts          INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+                all_ok      INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_tpl_outcomes
+                ON ocr_template_outcomes(template_id, ts);
+        `);
+
         // ── Tablas de plantillas OCR (migradas desde JSON) ────────────────────
         this.db.exec(`
             CREATE TABLE IF NOT EXISTS ocr_templates (
@@ -1400,6 +1428,87 @@ class ZiloDatabase {
             isReliable:    r.confirmations >= 3,
             isExpert:      r.confirmations >= 10,
         }));
+    }
+
+    // =========================================================================
+    // APRENDIZAJE POR CAMPO (ancla / lado / patrón) + CONFIANZA DE AUTO
+    // =========================================================================
+
+    /**
+     * Suma un voto para un campo. kind ∈ {anchor, side, pattern}. Acumulativo:
+     * el valor efectivo de cada kind será el de mayor 'count'.
+     */
+    recordFieldVote(templateId, partLabel, kind, value) {
+        if (!templateId || !partLabel || !kind || !value) return { success: false };
+        try {
+            this.db.prepare(`
+                INSERT INTO ocr_field_votes (template_id, part_label, kind, value, count, updated_at)
+                VALUES (?,?,?,?,1,strftime('%s','now'))
+                ON CONFLICT(template_id, part_label, kind, value) DO UPDATE SET
+                    count = count + 1,
+                    updated_at = strftime('%s','now')
+            `).run(templateId, partLabel, kind, String(value));
+            return { success: true };
+        } catch (e) {
+            return { success: false, error: e.message };
+        }
+    }
+
+    /**
+     * Aprendizaje por campo de una plantilla: por cada part_label, el ancla, el
+     * lado y el patrón más votados. → { partLabel: { anchor, side, pattern } }
+     */
+    getFieldLearning(templateId) {
+        const out = {};
+        if (!templateId) return out;
+        try {
+            const rows = this.db.prepare(
+                `SELECT part_label, kind, value, count FROM ocr_field_votes
+                 WHERE template_id=? ORDER BY count DESC`
+            ).all(templateId);
+            for (const r of rows) {
+                if (!out[r.part_label]) out[r.part_label] = {};
+                // como vienen ordenados por count DESC, el primero de cada kind gana
+                if (out[r.part_label][r.kind] == null) out[r.part_label][r.kind] = r.value;
+            }
+        } catch (_) {}
+        return out;
+    }
+
+    /** Registra el resultado de un documento (all_ok) para la confianza de auto. */
+    recordTemplateOutcome(templateId, allOk) {
+        if (!templateId) return { success: false };
+        try {
+            this.db.prepare(
+                `INSERT INTO ocr_template_outcomes (template_id, all_ok) VALUES (?,?)`
+            ).run(templateId, allOk ? 1 : 0);
+            // Conservar solo los últimos 30 por plantilla
+            const ids = this.db.prepare(
+                `SELECT id FROM ocr_template_outcomes WHERE template_id=? ORDER BY ts DESC LIMIT -1 OFFSET 30`
+            ).all(templateId);
+            for (const row of ids) this.db.prepare('DELETE FROM ocr_template_outcomes WHERE id=?').run(row.id);
+            return { success: true };
+        } catch (e) {
+            return { success: false, error: e.message };
+        }
+    }
+
+    /**
+     * ¿La plantilla es de fiar para AUTO? True si los últimos K resultados existen
+     * y TODOS fueron all_ok=1 (acuerdo de señales + patrón válido + sin corrección).
+     */
+    isTemplateTrusted(templateId, K = 5) {
+        if (!templateId) return { trusted: false, recentOk: 0, needed: K };
+        try {
+            const rows = this.db.prepare(
+                `SELECT all_ok FROM ocr_template_outcomes WHERE template_id=? ORDER BY ts DESC LIMIT ?`
+            ).all(templateId, K);
+            const recentOk = rows.filter(r => r.all_ok === 1).length;
+            const trusted  = rows.length >= K && recentOk === K;
+            return { trusted, recentOk, total: rows.length, needed: K };
+        } catch (e) {
+            return { trusted: false, recentOk: 0, needed: K, error: e.message };
+        }
     }
 
 } // ── fin clase ZiloDatabase ───────────────────────────────────────────────

@@ -54,6 +54,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getAdaptiveZone:    (data) => ipcRenderer.invoke('position-get-adaptive', data),
   getPositionStats:   (tplId)=> ipcRenderer.invoke('position-get-stats',    tplId),
 
+  // Aprendizaje por campo (ancla/lado/patrón) + confianza de auto
+  recordFieldVote:       (data) => ipcRenderer.invoke('field-record-vote',        data),
+  getFieldLearning:      (tplId)=> ipcRenderer.invoke('field-get-learning',       tplId),
+  recordTemplateOutcome: (data) => ipcRenderer.invoke('template-record-outcome',  data),
+  isTemplateTrusted:     (data) => ipcRenderer.invoke('template-is-trusted',      data),
+
   mlTrain:      (text, className) => ipcRenderer.invoke('ml-train',        { text, className }),
   mlClassify:   (text)            => ipcRenderer.invoke('ml-classify',     text),
   mlGetStats:   ()                => ipcRenderer.invoke('ml-get-stats'),

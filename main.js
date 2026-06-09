@@ -1267,6 +1267,23 @@ ipcMain.handle('position-get-stats', (event, templateId) => {
   return ziloDb.getPositionLearningStats(templateId);
 });
 
+// ── Aprendizaje por campo (ancla/lado/patrón) + confianza de auto ──────────────
+ipcMain.handle('field-record-vote', (event, { templateId, partLabel, kind, value }) => {
+  return ziloDb.recordFieldVote(templateId, partLabel, kind, value);
+});
+
+ipcMain.handle('field-get-learning', (event, templateId) => {
+  return ziloDb.getFieldLearning(templateId);
+});
+
+ipcMain.handle('template-record-outcome', (event, { templateId, allOk }) => {
+  return ziloDb.recordTemplateOutcome(templateId, allOk);
+});
+
+ipcMain.handle('template-is-trusted', (event, { templateId, K }) => {
+  return ziloDb.isTemplateTrusted(templateId, K || 5);
+});
+
 // ── Motor ML ──────────────────────────────────────────────────────────────────
 ipcMain.handle('ml-train', async (event, { text, className }) => {
   // Normalizar nombre del tipo a mayúsculas para que _isExpertForType lo encuentre siempre

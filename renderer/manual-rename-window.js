@@ -800,6 +800,23 @@ function setupZoom() {
         e.preventDefault();
         adjustZoom(e.deltaY < 0 ? +ZOOM_STEP : -ZOOM_STEP, e.clientX, e.clientY);
     }, { passive: false });
+
+    // ── Giro manual (cuando el escaneo está algo torcido) ──────────────────────
+    const ROT_STEP = 0.2;   // grados por clic
+    const rotLabel = () => { const el = document.getElementById('rot-label'); if (el) el.textContent = `${pdfSkewAngle.toFixed(1)}°`; };
+    const applyRot = async (delta) => {
+        pdfSkewAngle = Math.max(-5, Math.min(5, +(pdfSkewAngle + delta).toFixed(2)));
+        rotLabel();
+        await renderPage();
+        renderOverlay();
+        // Re-leer los campos (no pisar lo que el usuario ya haya tecleado/movido)
+        if (!inSuggestionMode && activeTpl?.renameParts) {
+            prefillOcrFieldsFromTemplate(activeTpl.renameParts.filter(p => p.type === 'ocr'));
+        }
+    };
+    document.getElementById('btn-rot-left')?.addEventListener('click',  () => applyRot(-ROT_STEP));
+    document.getElementById('btn-rot-right')?.addEventListener('click', () => applyRot(+ROT_STEP));
+    document.getElementById('btn-rot-reset')?.addEventListener('click', () => applyRot(-pdfSkewAngle));
 }
 
 async function adjustZoom(delta, focalClientX, focalClientY) {
@@ -997,6 +1014,7 @@ async function loadPdf(filePath) {
             await p1.render({ canvasContext: tmp.getContext('2d'), viewport: vp }).promise;
             pdfSkewAngle = detectSkewAngle(tmp);
         } catch (_) {}
+        const rl = document.getElementById('rot-label'); if (rl) rl.textContent = `${pdfSkewAngle.toFixed(1)}°`;
 
         await renderPage();
     } catch (e) {
@@ -1052,7 +1070,42 @@ let tplIdZone     = null;    // { rect, text }
 let tplParts      = [];      // [{ id, type:'text'|'ocr'|'text-search', value?, rect?, label?, before?, after?, transform?, _preview?, _loading? }]
 let tplPendingPartId = null; // id de la parte OCR esperando que se dibuje su zona
 let correctionPart = null;   // parte OCR del formulario que se está corrigiendo dibujando zona
-let correctedRects = {};     // { partId: rect } zonas redibujadas por el usuario (para aprendizaje)
+let correctedRects = {};     // { partId: rect } zonas redibujadas/movidas por el usuario
+
+// ── Arrastre del recuadro propuesto (mover, no redibujar) ──────────────────────
+let movingPart = null;       // parte OCR que se está arrastrando
+let moveGrab   = { dx: 0, dy: 0 };   // offset del cursor dentro del recuadro
+let moveRect   = null;       // recuadro durante el arrastre
+
+/** Recuadro mostrado de una parte OCR: arrastre > corrección > final > offset. */
+function displayedOcrRect(p) {
+    if (movingPart && movingPart.id === p.id && moveRect) return moveRect;
+    if (correctedRects[p.id]) return correctedRects[p.id];
+    const finalRects = (fileData?.partFinalRects && activeTpl?.id === fileData?.suggestedTemplateId)
+        ? fileData.partFinalRects : null;
+    if (finalRects && finalRects[p.id]) return finalRects[p.id];
+    const off = zoneOffset || { dx: 0, dy: 0 };
+    return {
+        x: Math.max(0, Math.min(0.98 - p.rect.w, p.rect.x + off.dx)),
+        y: Math.max(0, Math.min(0.98 - p.rect.h, p.rect.y + off.dy)),
+        w: p.rect.w, h: p.rect.h,
+    };
+}
+
+/** ¿El punto (0..1) cae sobre algún recuadro OCR? Devuelve la parte o null. */
+function hitTestOcrPart(pos) {
+    if (tplMode || !activeTpl) return null;
+    let best = null, bestArea = Infinity;
+    for (const p of (activeTpl.renameParts || [])) {
+        if (p.type !== 'ocr' || !p.rect || (p.page || 0) !== 0) continue;
+        const r = displayedOcrRect(p);
+        if (pos.x >= r.x && pos.x <= r.x + r.w && pos.y >= r.y && pos.y <= r.y + r.h) {
+            const area = r.w * r.h;
+            if (area < bestArea) { best = { part: p, rect: r }; bestArea = area; }
+        }
+    }
+    return best;
+}
 
 function genTplPartId() {
     return 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
@@ -1074,33 +1127,78 @@ function setupDrawCanvas() {
     const draw = document.getElementById('draw-canvas');
 
     draw.addEventListener('mousedown', e => {
-        if (!drawingFor || e.button !== 0) return;
-        e.stopPropagation();   // evitar que el pan del scroll se active al dibujar
-        e.preventDefault();
-        isDrawing   = true;
-        drawStart   = getRelPos(e, draw);
-        drawCurrent = { ...drawStart };
+        if (e.button !== 0) return;
+        // 1) Modo dibujo (crear plantilla / redibujar): comportamiento previo
+        if (drawingFor) {
+            e.stopPropagation(); e.preventDefault();
+            isDrawing   = true;
+            drawStart   = getRelPos(e, draw);
+            drawCurrent = { ...drawStart };
+            return;
+        }
+        // 2) Mover un recuadro propuesto: si el clic cae sobre uno, arrastrarlo
+        const pos = getRelPos(e, draw);
+        const hit = hitTestOcrPart(pos);
+        if (hit) {
+            e.stopPropagation(); e.preventDefault();   // no activar el pan
+            // Si estamos viendo la SUGERENCIA, pasar a edición para que aparezcan
+            // los campos (el movimiento refresca el valor de su campo).
+            if (inSuggestionMode) switchToEditMode();
+            movingPart = hit.part;
+            moveRect   = { ...hit.rect };
+            moveGrab   = { dx: pos.x - hit.rect.x, dy: pos.y - hit.rect.y };
+            draw.style.cursor = 'grabbing';
+            renderOverlay();
+        }
+        // si no hay hit, dejar que burbujee → pan del documento
     });
 
     draw.addEventListener('mousemove', e => {
-        if (!isDrawing) return;
-        drawCurrent = getRelPos(e, draw);
-        renderOverlay();
+        if (isDrawing) { drawCurrent = getRelPos(e, draw); renderOverlay(); return; }
+        if (movingPart) {
+            const pos = getRelPos(e, draw);
+            const w = moveRect.w, h = moveRect.h;
+            moveRect = {
+                x: Math.max(0, Math.min(1 - w, pos.x - moveGrab.dx)),
+                y: Math.max(0, Math.min(1 - h, pos.y - moveGrab.dy)),
+                w, h,
+            };
+            renderOverlay();
+            return;
+        }
+        // Cursor de "mover" al pasar sobre un recuadro
+        if (!drawingFor) {
+            const over = hitTestOcrPart(getRelPos(e, draw));
+            draw.style.cursor = over ? 'grab' : '';
+        }
     });
 
-    draw.addEventListener('mouseup', e => {
-        if (!isDrawing) return;
-        isDrawing = false;
-        drawCurrent = getRelPos(e, draw);
-        const rect = normRect(drawStart, drawCurrent);
-        if (rect.w >= 0.01 && rect.h >= 0.005) {
-            handleZoneDrawn(rect);
+    draw.addEventListener('mouseup', async e => {
+        if (isDrawing) {
+            isDrawing = false;
+            drawCurrent = getRelPos(e, draw);
+            const rect = normRect(drawStart, drawCurrent);
+            if (rect.w >= 0.01 && rect.h >= 0.005) handleZoneDrawn(rect);
+            renderOverlay();
+            return;
         }
-        renderOverlay();
+        if (movingPart) {
+            const part = movingPart;
+            correctedRects[part.id] = { ...moveRect };
+            movingPart = null;
+            draw.style.cursor = 'grab';
+            renderOverlay();
+            await applyMovedPart(part, correctedRects[part.id]);   // re-OCR + refrescar campo
+        }
     });
 
     draw.addEventListener('mouseleave', () => {
         if (isDrawing) { isDrawing = false; renderOverlay(); }
+        if (movingPart) {   // soltar fuera: confirmar en la última posición
+            const part = movingPart; movingPart = null; renderOverlay();
+            correctedRects[part.id] = { ...moveRect };
+            applyMovedPart(part, correctedRects[part.id]);
+        }
     });
 
     // Cancelar zona activa
@@ -1175,18 +1273,16 @@ function renderOverlay() {
         if (idr && (activeTpl.identification.page || 0) === 0) {
             drawZoneRect(shift(idr), '#f59e0b', 'rgba(245,158,11,0.15)', '🔍 NIF/Identificación');
         }
-        // Recuadros sobre el dato REAL calculados durante el procesamiento
-        // (posición exacta del valor leído). Si no llegan, se usa el desplazamiento.
-        const finalRects = (fileData?.partFinalRects && activeTpl?.id === fileData.suggestedTemplateId)
-            ? fileData.partFinalRects : null;
+        // Recuadros sobre el dato real; arrastrables (ver displayedOcrRect).
         let ocrIdx = 0;
         for (const p of (activeTpl.renameParts || [])) {
             if (p.type !== 'ocr' || !p.rect) continue;
             if ((p.page || 0) !== 0) continue;
             ocrIdx++;
-            const real = finalRects && finalRects[p.id];
-            const box  = real ? real : shift(p.rect);
-            drawZoneRect(box, '#10b981', 'rgba(16,185,129,0.15)',
+            const moving = movingPart && movingPart.id === p.id;
+            const box = displayedOcrRect(p);
+            drawZoneRect(box, moving ? '#2563eb' : '#10b981',
+                moving ? 'rgba(37,99,235,0.18)' : 'rgba(16,185,129,0.15)',
                 p.label ? `${p.label}` : `Dato ${ocrIdx}`);
         }
     }
@@ -1288,6 +1384,24 @@ function startDrawingPart(partId) {
     document.getElementById('hint-id').classList.remove('active');
     document.getElementById('hint-part').classList.add('active');
     renderTplParts();
+}
+
+/**
+ * El usuario MOVIÓ el recuadro propuesto → re-leer esa zona y refrescar el campo.
+ * La nueva posición queda en correctedRects[part.id] (se aprende como user_drawn al
+ * confirmar y se promedia con las correcciones anteriores).
+ */
+async function applyMovedPart(part, rect) {
+    if (!part || !rect) return;
+    const inp = document.getElementById(`inp-part-${part.id}`);
+    try {
+        let text = await ocrZoneManual(rect, { numeric: partIsNumeric(part) });
+        text = applyTransform(text, part.transform);
+        if (inp) {
+            inp.value = text;
+            inp.dispatchEvent(new Event('input'));   // recalcula el nombre sugerido
+        }
+    } catch (_) {}
 }
 
 async function handleZoneDrawn(rect) {

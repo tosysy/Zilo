@@ -110,6 +110,26 @@ async function _isExpertForTemplate(templateId) {
     return confirmations >= TEMPLATE_EXPERT_THRESHOLD;
 }
 
+/**
+ * ¿Se puede AUTO-renombrar con esta plantilla? Confianza MEDIBLE: los últimos K=5
+ * documentos se extrajeron bien y el usuario NO corrigió (ocr_template_outcomes).
+ * Sustituye al umbral fijo de confirmaciones: plantillas limpias llegan a auto en
+ * pocos documentos; las irregulares tardan más o nunca.
+ */
+async function _canAutoForTemplate(templateId) {
+    if (!templateId) return false;
+    try {
+        const t = await window.electronAPI.isTemplateTrusted({ templateId, K: 5 });
+        return !!(t && t.trusted);
+    } catch (_) { return false; }
+}
+
+/** Registra el resultado de un documento para la confianza de auto. */
+function _recordOutcome(templateId, allOk) {
+    if (!templateId) return;
+    try { window.electronAPI.recordTemplateOutcome({ templateId, allOk: !!allOk }); } catch (_) {}
+}
+
 // ── Búsqueda de texto en OCR ya extraído (sin re-OCR) ───────────────────────
 
 /**
@@ -453,7 +473,7 @@ async function processFile(file, fileId) {
         // ── Modo tipo directo ──────────────────────────────────────────────────
         if (currentMode === 'type' && currentDocType) {
             let renameText = '', fromParts = false, tplId = null;
-            let dirOffset = null, dirRects = null;
+            let dirOffset = null, dirRects = null, dirAllOk = false;
             if (_getTypeTemplateIds(currentDocType).length) {
                 updateFileStatus(fileId, 'Extrayendo nombre...', 55);
                 const r = await extractRenameTextForType(file, currentDocType, text);
@@ -462,14 +482,16 @@ async function processFile(file, fileId) {
                 tplId      = r.templateId || null;
                 dirOffset  = r.zoneOffset || null;
                 dirRects   = r.partFinalRects || null;
+                dirAllOk   = r.allFieldsOk || false;
             }
             // Fallback: patrones aprendidos si no hay template OCR configurado
             if (!renameText && text) {
                 renameText = await _extractByLearnedPattern(text, currentDocType.name);
             }
-            // Experto POR PLANTILLA (no por tipo): cada proveedor aprende por separado
-            const expert = await _isExpertForTemplate(tplId);
-            if (expert) {
+            // AUTO solo por CONFIANZA medible Y validación de ESTE documento.
+            const canAuto = await _canAutoForTemplate(tplId);
+            if (canAuto && dirAllOk) {
+                _recordOutcome(tplId, true);
                 await processWithType(file, fileId, currentDocType, text, false, renameText, fromParts, tplId);
             } else {
                 const suggested = generateAdaptiveName(file.name, currentDocType, renameText, fromParts);
@@ -484,11 +506,12 @@ async function processFile(file, fileId) {
             updateFileStatus(fileId, 'Detectando tipo...', 60);
             const matched = await detectDocumentType(file, text);
             if (matched && matched.confianza === 'high') {
-                // Experto POR PLANTILLA del proveedor concreto detectado
-                const expert = await _isExpertForTemplate(matched.templateId);
-                if (expert) {
+                // AUTO solo por CONFIANZA medible Y validación de ESTE documento
+                const canAuto = await _canAutoForTemplate(matched.templateId);
+                if (canAuto && matched.allFieldsOk) {
                     const src = matched.source === 'ml' ? `🤖 ML ${Math.round((matched.mlConfidence||0)*100)}%` : '🎯 Zonas';
                     updateFileStatus(fileId, `${src} — procesando...`, 65);
+                    _recordOutcome(matched.templateId, true);
                     await processWithType(file, fileId, matched.type, text, true, matched.renameText, matched.fromParts, matched.templateId);
                 } else {
                     const suggested = generateAdaptiveName(file.name, matched.type, matched.renameText, matched.fromParts);
@@ -1517,6 +1540,113 @@ function _findValueRectInWords(pageWords, value, expectedRect = null, numeric = 
     };
 }
 
+// =================================================================================
+// APRENDIZAJE POR CAMPO: patrón del valor + etiqueta-ancla (robustez)
+// =================================================================================
+
+/**
+ * "Firma" del valor: colapsa dígitos→9 y letras→A (conservando separadores y
+ * tolerando longitud). "18223"→"9", "B-36979128"→"A-9", "1-25088"→"9-9",
+ * "LLBAR"→"A". Sirve para VALIDAR (rechazar basura/etiquetas) y para inferir si el
+ * campo es numérico aunque no tenga etiqueta.
+ */
+function _valueSignature(v) {
+    if (!v) return '';
+    let out = '', last = '';
+    for (const ch of String(v).trim()) {
+        let cls;
+        if (/[0-9]/.test(ch)) cls = '9';
+        else if (/[A-Za-zÀ-ÿ]/.test(ch)) cls = 'A';
+        else cls = ch;                       // separador literal
+        if (cls === '9' || cls === 'A') { if (cls !== last) out += cls; }
+        else out += cls;
+        last = cls;
+    }
+    return out;
+}
+
+/** ¿El valor casa con la firma aprendida? (firma vacía = sin restricción). */
+function _valueMatchesSignature(value, signature) {
+    if (!signature) return true;
+    return _valueSignature(value) === signature;
+}
+
+/** ¿La firma es puramente numérica (sin letras)? → campo numérico. */
+function _signatureIsNumeric(signature) {
+    return !!signature && !signature.includes('A');
+}
+
+/**
+ * Encuentra la ETIQUETA-ancla de un campo: las palabras justo a la IZQUIERDA (misma
+ * línea) o ENCIMA del recuadro del valor, que contengan letras (una etiqueta como
+ * "Nº ALBARAN"). Devuelve { text, side } o null.
+ */
+function _findAnchorForRect(pageWords, rect) {
+    if (!pageWords?.length || !rect) return null;
+    const cy = rect.y + rect.h / 2, cx = rect.x + rect.w / 2;
+    const hasLetters = w => /[A-Za-zÀ-ÿ]/.test(w.text || '');
+
+    // Izquierda en la misma línea
+    const left = pageWords
+        .filter(w => hasLetters(w) && Math.abs(w.cy - cy) < rect.h * 0.9 && w.cx < cx)
+        .sort((a, b) => b.cx - a.cx);   // el más cercano a la izquierda primero
+    if (left.length) {
+        // unir hasta 3 palabras contiguas hacia la izquierda
+        const line = left.slice(0, 3).sort((a, b) => a.cx - b.cx);
+        const text = line.map(w => w.text).join(' ').trim();
+        if (text.length >= 2) return { text, side: 'left' };
+    }
+
+    // Encima (solapando en X)
+    const above = pageWords
+        .filter(w => hasLetters(w) && w.cy < cy && (cy - w.cy) < rect.h * 3
+                     && Math.abs(w.cx - cx) < rect.w)
+        .sort((a, b) => b.cy - a.cy);
+    if (above.length) {
+        const text = (above[0].text || '').trim();
+        if (text.length >= 2) return { text, side: 'above' };
+    }
+    return null;
+}
+
+/**
+ * Extrae el valor de un campo buscando su ETIQUETA-ancla en el documento y tomando
+ * el dato adyacente (derecha si la etiqueta está a la izquierda; abajo si encima).
+ * Valida contra la firma. Inmune a desplazamiento del documento.
+ * @returns {string} valor o ''.
+ */
+function _extractByAnchorWords(pageWords, anchorText, side, signature) {
+    if (!pageWords?.length || !anchorText) return '';
+    const target = _normalizeText(anchorText).split(/\s+/).filter(Boolean);
+    if (!target.length) return '';
+
+    // Localizar la primera palabra del ancla en el documento
+    const norm = w => _normalizeText(w.text || '');
+    const anchors = pageWords.filter(w => norm(w) === target[0] || norm(w).includes(target[0]));
+    let best = '';
+    for (const a of anchors) {
+        // Confirmar que las siguientes palabras del ancla también están a la derecha
+        // (no estricto: con la primera basta si es distintiva)
+        const cyA = a.cy;
+        let cands;
+        if (side === 'above') {
+            cands = pageWords.filter(w => w.cy > cyA && (w.cy - cyA) < a.h * 4
+                                          && Math.abs(w.cx - a.cx) < Math.max(a.w, 0.06))
+                             .sort((x, y) => x.cy - y.cy);
+        } else {
+            cands = pageWords.filter(w => Math.abs(w.cy - cyA) < a.h * 0.9 && w.cx > a.cx)
+                             .sort((x, y) => x.cx - y.cx);
+        }
+        for (const c of cands) {
+            const t = (c.text || '').trim();
+            if (!t) continue;
+            if (_valueMatchesSignature(t, signature)) return t;   // primer candidato válido
+            if (!best && /[0-9A-Za-z]/.test(t)) best = t;
+        }
+    }
+    return signature ? '' : best;   // si hay firma exigida y nada casó → vacío
+}
+
 /**
  * Calcula el desplazamiento de alineación (offset global) de una plantilla usando
  * el dato único de su zona de identificación (teléfono/CIF). Prefiere la posición
@@ -1581,6 +1711,7 @@ async function _buildRenameText(getCanvas, tpl, fullOcrText = '') {
 
         const segments = [];
         const partFinalRects = {};   // { partId: rect real donde está el dato (para la preview) }
+        const fieldConf = [];        // [{ id, valid, agreed }] para la confianza de auto
         for (const part of tpl.renameParts) {
             if (part.type === 'text') {
                 segments.push(part.value || '');
@@ -1618,33 +1749,50 @@ async function _buildRenameText(getCanvas, tpl, fullOcrText = '') {
                     }
                 }
 
-                // ── Extracción con aprendizaje de posición (cascada 3 niveles) ──
-                let text = await _ocrCropWithLearning(pg, rect, tpl, part);
+                // ── Aprendizaje por campo: patrón (firma) y etiqueta-ancla ──────
+                const learn     = (tpl._fieldLearning && tpl._fieldLearning[partKey(part)]) || {};
+                const signature = learn.pattern || '';
+                const numeric   = _partIsNumeric(part) || _signatureIsNumeric(signature);
+                const partWords = (tpl._allWords || []).find(p => p.page === (part.page || 0))?.words || null;
 
-                // ── Fallback inmune a inclinación: buscar por la ETIQUETA en el
-                //    texto completo si la zona no dio nada o dio algo no numérico ─
-                const numeric = _partIsNumeric(part);
-                const rawDigits = (text || '').replace(/[^0-9]/g, '');
-                const zonaFallo = !text.trim() || (numeric && rawDigits.length < 2);
+                // ── SEÑAL A: lectura por POSICIÓN (cascada de aprendizaje) ───────
+                let posText = await _ocrCropWithLearning(pg, rect, tpl, part);
+                const rawDigits = (posText || '').replace(/[^0-9]/g, '');
+                const zonaFallo = !posText.trim() || (numeric && rawDigits.length < 2);
                 if (zonaFallo && fullOcrText && part.label) {
                     const byLabel = _findValueByLabelInText(fullOcrText, part.label, numeric);
-                    if (byLabel) {
-                        window.electronAPI.logToCmd(`🧭 CAMPO "${part.label}": el recuadro falló (documento torcido/desplazado), pero lo encontré por su etiqueta en el texto: "${byLabel}"`);
-                        text = byLabel;
-                    }
+                    if (byLabel) posText = byLabel;
                 }
 
-                // ── Recuadro REAL para la preview: situar el recuadro justo encima
-                //    del valor leído (usando posiciones de palabra del OCR) ───────
-                const partWords = (tpl._allWords || []).find(p => p.page === (part.page || 0))?.words || null;
-                const realRect  = _findValueRectInWords(partWords, text, rect, numeric);
+                // ── SEÑAL B: por ETIQUETA-ANCLA aprendida (inmune a desplazamiento)
+                let ancText = '';
+                if (learn.anchor) ancText = _extractByAnchorWords(partWords, learn.anchor, learn.side || 'left', signature);
+
+                // ── Validar contra la firma del valor y CRUZAR señales ──────────
+                const posOk = !!posText.trim() && _valueMatchesSignature(posText, signature);
+                const ancOk = !!ancText.trim() && _valueMatchesSignature(ancText, signature);
+                const normEq = (a, b) => (a || '').replace(/\s+/g, '').toLowerCase() === (b || '').replace(/\s+/g, '').toLowerCase();
+
+                let text, agreed = false, valid = false;
+                if (posOk && ancOk && normEq(posText, ancText)) { text = posText; agreed = true; valid = true; }
+                else if (ancOk) { text = ancText; valid = true; if (!normEq(posText, ancText)) window.electronAPI.logToCmd(`🧭 CAMPO "${part.label || partKey(part)}": uso la posición de su etiqueta ("${learn.anchor}") → "${ancText}" (la zona leyó "${(posText||'').slice(0,20)}").`); }
+                else if (posOk) { text = posText; valid = true; }
+                else { text = posText || ancText || ''; valid = !signature && !!String(text).trim(); }
+
+                fieldConf.push({ id: partKey(part), valid, agreed });
+
+                // ── Recuadro REAL para la preview: sobre el valor elegido ───────
+                const realRect = _findValueRectInWords(partWords, text, rect, numeric);
                 partFinalRects[partKey(part)] = realRect || rect;
 
                 text = _applyPartTransform(text, part.transform || 'none');
                 segments.push(text);
             }
         }
-        tpl._partFinalRects = partFinalRects;   // leído por el llamador para la preview
+        tpl._partFinalRects   = partFinalRects;   // leído por el llamador para la preview
+        tpl._fieldConfidence  = fieldConf;
+        // Sin campos OCR que validar (solo texto fijo / búsqueda) → no bloquea auto.
+        tpl._allFieldsOk      = fieldConf.every(f => f.valid);
         return segments.join('').trim();
     }
     // Compatibilidad con plantillas antiguas (campo rename)
@@ -1878,7 +2026,9 @@ async function detectTypeByOcrZonal(file, mlHint = null, fullOcrText = '') {
     const offset = await _computeAlignOffset(getCanvas, best.tpl, commonCifs, best.matchedDigit, idPageWords);
 
     // Construir el nombre (offset global + búsqueda local por campo)
-    const tplForBuild = { ...best.tpl, _gOffset: offset, _allWords: file._ocrWords };
+    let fieldLearning = {};
+    try { fieldLearning = await window.electronAPI.getFieldLearning(best.tpl.id) || {}; } catch (_) {}
+    const tplForBuild = { ...best.tpl, _gOffset: offset, _allWords: file._ocrWords, _fieldLearning: fieldLearning };
     const renameText  = await _buildRenameText(getCanvas, tplForBuild, fullOcrText);
 
     window.electronAPI.logToCmd(`   ✅ ELEGIDA la plantilla "${best.tpl.nombre}" (tipo ${best.type.name}) — proveedor identificado al ${Math.round(best.score*100)}%.`);
@@ -1892,6 +2042,8 @@ async function detectTypeByOcrZonal(file, mlHint = null, fullOcrText = '') {
         _tplNombre: best.tpl.nombre,
         zoneOffset: offset,   // (C) las zonas se mostrarán desplazadas igual en la sugerencia
         partFinalRects: tplForBuild._partFinalRects || null,   // (D) recuadros sobre el dato real
+        allFieldsOk:    tplForBuild._allFieldsOk || false,     // (E/F) validación por campo
+        fieldConfidence: tplForBuild._fieldConfidence || null,
     };
 }
 
@@ -1999,9 +2151,10 @@ async function extractRenameTextForType(file, type, fullOcrText = '') {
         const tpl = tplMap[tplIds[0]];
         if (!tpl) return { text: '', fromParts: false, templateId: null };
         const zoneOffset = await _computeAlignOffset(getCanvas, tpl, commonCifs, null, wordsFor(tpl));
-        const tb = { ...tpl, _gOffset: zoneOffset, _allWords: file._ocrWords };
+        let fl = {}; try { fl = await window.electronAPI.getFieldLearning(tpl.id) || {}; } catch (_) {}
+        const tb = { ...tpl, _gOffset: zoneOffset, _allWords: file._ocrWords, _fieldLearning: fl };
         const text = await _buildRenameText(getCanvas, tb, fullOcrText);
-        return { text, fromParts: Array.isArray(tpl.renameParts) && tpl.renameParts.length > 0, templateId: tpl.id, zoneOffset, partFinalRects: tb._partFinalRects || null };
+        return { text, fromParts: Array.isArray(tpl.renameParts) && tpl.renameParts.length > 0, templateId: tpl.id, zoneOffset, partFinalRects: tb._partFinalRects || null, allFieldsOk: tb._allFieldsOk || false, fieldConfidence: tb._fieldConfidence || null };
     }
 
     // ── Varias plantillas: elegir por el CONTENIDO de la zona (+ apoyo nombre) ─
@@ -2023,7 +2176,8 @@ async function extractRenameTextForType(file, type, fullOcrText = '') {
 
     if (!bestTpl) return { text: '', fromParts: false, templateId: null };
     const zoneOffset = await _computeAlignOffset(getCanvas, bestTpl, commonCifs, bestDigit, wordsFor(bestTpl));
-    const tb = { ...bestTpl, _gOffset: zoneOffset, _allWords: file._ocrWords };
+    let fl = {}; try { fl = await window.electronAPI.getFieldLearning(bestTpl.id) || {}; } catch (_) {}
+    const tb = { ...bestTpl, _gOffset: zoneOffset, _allWords: file._ocrWords, _fieldLearning: fl };
     const text = await _buildRenameText(getCanvas, tb, fullOcrText);
     return {
         text,
@@ -2031,6 +2185,8 @@ async function extractRenameTextForType(file, type, fullOcrText = '') {
         templateId: bestTpl.id,
         zoneOffset,
         partFinalRects: tb._partFinalRects || null,
+        allFieldsOk: tb._allFieldsOk || false,
+        fieldConfidence: tb._fieldConfidence || null,
     };
 }
 
@@ -2410,6 +2566,39 @@ async function handleManualRenameConfirmed(data) {
                             if (r?.learned) window.electronAPI.logToCmd(`🆔 APRENDIDO: el CIF/NIF "${r.cif}" pertenece a esta plantilla. La próxima vez la reconoceré por ese CIF aunque la zona naranja falle.`);
                         } catch (_) {}
                     }
+                }
+
+                // 🧠 Aprendizaje por campo: PATRÓN del valor + ETIQUETA-ancla
+                if (data.templateId && data.partValues && file?._ocrWords) {
+                    try {
+                        const tplF  = (await window.electronAPI.getOcrTemplates() || []).find(t => t.id === data.templateId);
+                        const parts = (tplF?.renameParts || []).filter(p => p.type === 'ocr');
+                        const corrMap = {};
+                        for (const c of (data.correctedRects || [])) corrMap[c.partLabel] = c.rect;
+                        for (const p of parts) {
+                            const key   = p.id;
+                            const value = (data.partValues[key] || '').trim();
+                            if (!value) continue;
+                            const sig = _valueSignature(value);
+                            if (sig) window.electronAPI.recordFieldVote({ templateId: data.templateId, partLabel: key, kind: 'pattern', value: sig });
+                            const pw   = (file._ocrWords.find(x => x.page === (p.page || 0)) || {}).words || null;
+                            const rect = corrMap[key] || _findValueRectInWords(pw, value, null, _signatureIsNumeric(sig));
+                            if (rect && pw) {
+                                const anc = _findAnchorForRect(pw, rect);
+                                if (anc?.text) {
+                                    window.electronAPI.recordFieldVote({ templateId: data.templateId, partLabel: key, kind: 'anchor', value: anc.text });
+                                    window.electronAPI.recordFieldVote({ templateId: data.templateId, partLabel: key, kind: 'side',   value: anc.side });
+                                }
+                            }
+                        }
+                    } catch (_) {}
+                }
+
+                // 📊 Resultado para la confianza de auto: all_ok = el usuario NO tuvo
+                // que mover ningún recuadro (la sugerencia fue aceptada tal cual).
+                if (data.templateId) {
+                    const corrected = Array.isArray(data.correctedRects) && data.correctedRects.length > 0;
+                    _recordOutcome(data.templateId, !corrected);
                 }
             } else {
                 updateFileStatus(fileId, `❌ ${result.error}`, 100, 'error');
